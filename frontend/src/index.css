@@ -1,0 +1,124 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: 'Söhne', 'ui-sans-serif', 'system-ui', -apple-system, 'Segoe UI', Roboto, Ubuntu, Cantarell, 'Noto Sans', sans-serif;
+  background-color: #ffffff;
+  color: #0d0d0d;
+  min-height: 100vh;
+}
+
+/* Custom scrollbar - Light theme */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #c5c5c5;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #a0a0a0;
+}
+
+/* Selection */
+::selection {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+/* Input focus */
+input:focus, textarea:focus {
+  outline: none;
+}
+
+/* Typing indicator */
+.typing-dot {
+  animation: typingBounce 1.4s infinite ease-in-out both;
+}
+
+.typing-dot:nth-child(1) {
+  animation-delay: -0.32s;
+}
+
+.typing-dot:nth-child(2) {
+  animation-delay: -0.16s;
+}
+
+@keyframes typingBounce {
+  0%, 80%, 100% {
+    transform: scale(0.8);
+    opacity: 0.5;
+  }
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* Code blocks */
+pre {
+  background: #f7f7f8;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+code {
+  font-family: 'Söhne Mono', Monaco, 'Andale Mono', 'Ubuntu Mono', monospace;
+}
+
+/* Prose styling for markdown */
+.prose {
+  color: #0d0d0d;
+  line-height: 1.7;
+}
+
+.prose h1, .prose h2, .prose h3 {
+  color: #0d0d0d;
+  font-weight: 600;
+}
+
+.prose strong {
+  color: #0d0d0d;
+}
+
+.prose code {
+  background: #f7f7f8;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.9em;
+  color: #0d0d0d;
+}
+
+.prose pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.prose a {
+  color: #0d0d0d;
+}
+
+.prose ul, .prose ol {
+  padding-left: 1.5em;
+}
+
+.prose li {
+  margin: 0.5em 0;
+}
