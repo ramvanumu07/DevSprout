@@ -141,6 +141,26 @@ export function isDbReady() {
   return db !== null
 }
 
+// Save task progress directly (used by chat route)
+export async function saveTaskProgress(studentId, topicId, subtopicId, progress) {
+  if (!db) await initTaskDb()
+  
+  const key = getKey(studentId, topicId, subtopicId)
+  
+  db.data.taskProgress[key] = {
+    currentTask: progress.current || progress.currentTask || 0,
+    completedTasks: progress.completedTasks || [],
+    total: progress.total || 0,
+    completed: progress.completed || 0
+  }
+  
+  db.data.lastActivity[key] = Date.now()
+  
+  await db.write()
+  
+  return db.data.taskProgress[key]
+}
+
 // ═══════════════════════════════════════════════════════════════
 // CHAT HISTORY FUNCTIONS
 // ═══════════════════════════════════════════════════════════════

@@ -96,7 +96,9 @@ export default function Chat() {
         studentId: user?.studentId,
         topicId,
         subtopicId,
-        action: 'start_lesson'
+        action: 'start_lesson',
+        learningPoints: subtopic?.learningPoints || [],
+        tasks: subtopic?.tasks || []
       })
 
       setMessages([{
@@ -125,13 +127,10 @@ export default function Chat() {
   }
 
   const getDefaultWelcomeMessage = () => {
-    const tasks = subtopic?.tasks || []
-    return `Hey! Let's learn **${subtopic?.title}**.
+    // This is only shown when API fails - keep it simple
+    return `Let's learn **${subtopic?.title}** together! I'll teach you step by step.
 
-${tasks.length > 0 ? `**Tasks to complete:**
-${tasks.map((t, i) => `${i + 1}. ${t}`).join('\n')}
-
-Let's start with **Task 1**. Write your code and explain your thinking!` : `Show me what you know or ask me anything!`}`
+(If you see this message, please refresh - the AI service is still starting up.)`
   }
 
   const handleSend = async () => {
@@ -154,7 +153,9 @@ Let's start with **Task 1**. Write your code and explain your thinking!` : `Show
         topicId,
         subtopicId,
         message: userMessage,
-        history: messages.filter(m => m.role !== 'system')
+        history: messages.filter(m => m.role !== 'system'),
+        learningPoints: subtopic?.learningPoints || [],
+        tasks: subtopic?.tasks || []
       })
 
       // Update task progress

@@ -27,14 +27,24 @@ export async function initGoogleSheets() {
 
     sheets = google.sheets({ version: 'v4', auth })
     
-    // Ensure headers are correct
-    await ensureHeaders()
-    
-    console.log('✅ Google Sheets connected')
-    return true
+    // Test connection with a simple read
+    try {
+      await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: 'Sheet1!A1'
+      })
+      console.log('✅ Google Sheets connected')
+      return true
+    } catch (testError) {
+      console.log('⚠️  Google Sheets auth failed:', testError.message)
+      console.log('⚠️  Switching to demo mode - update your service account key to fix')
+      sheets = null
+      return false
+    }
 
   } catch (error) {
     console.error('❌ Google Sheets init error:', error.message)
+    sheets = null
     return false
   }
 }
@@ -65,6 +75,11 @@ async function ensureHeaders() {
     }
   } catch (error) {
     console.error('Error ensuring headers:', error.message)
+    // If there's an auth error, disable Google Sheets
+    if (error.message.includes('invalid_grant') || error.message.includes('JWT')) {
+      console.log('⚠️  Google Sheets auth failed - switching to demo mode')
+      sheets = null
+    }
   }
 }
 
