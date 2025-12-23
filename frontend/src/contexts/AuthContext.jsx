@@ -10,7 +10,7 @@ export function AuthProvider({ children }) {
 
   // Load user from localStorage on mount
   useEffect(() => {
-    const savedUser = localStorage.getItem('edubridge_user')
+    const savedUser = localStorage.getItem('devsprout_user')
     if (savedUser) {
       try {
         const userData = JSON.parse(savedUser)
@@ -18,7 +18,7 @@ export function AuthProvider({ children }) {
         // Sync progress from server
         syncProgressFromServer(userData.studentId)
       } catch (e) {
-        localStorage.removeItem('edubridge_user')
+        localStorage.removeItem('devsprout_user')
       }
     }
     setLoading(false)
@@ -41,7 +41,7 @@ export function AuthProvider({ children }) {
             streak: response.data.streak || prev.streak,
             totalHours: response.data.totalHours || prev.totalHours
           }
-          localStorage.setItem('edubridge_user', JSON.stringify(updated))
+          localStorage.setItem('devsprout_user', JSON.stringify(updated))
           return updated
         })
       }
@@ -62,7 +62,7 @@ export function AuthProvider({ children }) {
       if (response.data.success) {
         const userData = response.data.user
         setUser(userData)
-        localStorage.setItem('edubridge_user', JSON.stringify(userData))
+        localStorage.setItem('devsprout_user', JSON.stringify(userData))
         return { success: true }
       } else {
         return { success: false, error: response.data.message }
@@ -77,7 +77,7 @@ export function AuthProvider({ children }) {
 
   const logout = () => {
     setUser(null)
-    localStorage.removeItem('edubridge_user')
+    localStorage.removeItem('devsprout_user')
   }
 
   // Update progress locally and sync to server
@@ -97,7 +97,7 @@ export function AuthProvider({ children }) {
       totalHours: (user.totalHours || 0) + hoursSpent
     }
     setUser(updatedUser)
-    localStorage.setItem('edubridge_user', JSON.stringify(updatedUser))
+    localStorage.setItem('devsprout_user', JSON.stringify(updatedUser))
 
     // Sync to server
     try {

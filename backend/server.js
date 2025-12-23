@@ -47,7 +47,7 @@ async function startServer() {
   await initTaskDb()
 
   app.listen(PORT, () => {
-    console.log(`\n🚀 EduBridge API server running on http://localhost:${PORT}\n`)
+    console.log(`\n🌱 DevSprout API server running on http://localhost:${PORT}\n`)
     
     if (process.env.GROQ_API_KEY) {
       console.log('✅ Groq AI - Enabled')
