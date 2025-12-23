@@ -3,12 +3,35 @@ import { getStudent, addStudent, isSheetsEnabled, getStudentProgress, getStudent
 
 const router = express.Router()
 
-// Demo student (ONLY used when Google Sheets is not configured at all)
-const DEMO_STUDENT = {
-  studentId: 'demo',
-  secretKey: 'demo',
-  name: 'Demo User',
-  email: 'demo@example.com'
+// Demo students (fallback when Google Sheets is not configured)
+const DEMO_STUDENTS = {
+  'student001': {
+    secretKey: 'key123',
+    name: 'Alex Chen',
+    email: 'alex@example.com'
+  },
+  'student002': {
+    secretKey: 'key456',
+    name: 'Sarah Johnson',
+    email: 'sarah@example.com'
+  },
+  'demo': {
+    secretKey: 'demo',
+    name: 'Demo User',
+    email: 'demo@example.com'
+  }
+}
+
+// Demo progress (fallback)
+const DEMO_PROGRESS = {
+  'student001': {
+    'arrays': {
+      subtopics: {
+        'arrays-intro': true,
+        'arrays-operations': true
+      }
+    }
+  }
 }
 
 // POST /api/auth/login
@@ -27,7 +50,7 @@ router.post('/login', async (req, res) => {
     let progress = {}
     let stats = { streak: 0, totalHours: 0 }
 
-    // Use Google Sheets if enabled
+    // Try Google Sheets first (with error handling)
     if (isSheetsEnabled()) {
       try {
         student = await getStudent(studentId)
@@ -36,18 +59,16 @@ router.post('/login', async (req, res) => {
           stats = await getStudentStats(studentId)
         }
       } catch (sheetsError) {
-        console.error('Google Sheets error:', sheetsError.message)
-        return res.status(500).json({
-          success: false,
-          message: 'Database connection error. Please try again.'
-        })
+        console.log('Google Sheets error, falling back to demo:', sheetsError.message)
+        student = null
       }
-    } else {
-      // Only allow demo login when Sheets is NOT configured
-      if (studentId === 'demo' && secretKey === 'demo') {
-        student = DEMO_STUDENT
-        stats = { streak: 0, totalHours: 0 }
-      }
+    }
+
+    // Fallback to demo data
+    if (!student) {
+      student = DEMO_STUDENTS[studentId]
+      progress = DEMO_PROGRESS[studentId] || {}
+      stats = { streak: 5, totalHours: 12 }
     }
 
     // Validate credentials
@@ -91,30 +112,38 @@ router.post('/register', async (req, res) => {
       })
     }
 
-    // Require Google Sheets for registration
-    if (!isSheetsEnabled()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Registration requires database connection. Please contact admin.'
-      })
-    }
-
     // Check if student exists
-    const existing = await getStudent(studentId)
-    if (existing) {
-      return res.status(400).json({
-        success: false,
-        message: 'Student ID already exists'
-      })
-    }
+    if (isSheetsEnabled()) {
+      const existing = await getStudent(studentId)
+      if (existing) {
+        return res.status(400).json({
+          success: false,
+          message: 'Student ID already exists'
+        })
+      }
 
-    // Add to Google Sheets
-    const added = await addStudent(studentId, secretKey, name || studentId, email || '')
-    if (!added) {
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to create account'
-      })
+      // Add to Google Sheets
+      const added = await addStudent(studentId, secretKey, name || studentId, email || '')
+      if (!added) {
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to create account'
+        })
+      }
+    } else {
+      // Demo mode - check in-memory
+      if (DEMO_STUDENTS[studentId]) {
+        return res.status(400).json({
+          success: false,
+          message: 'Student ID already exists'
+        })
+      }
+      // Add to demo (won't persist)
+      DEMO_STUDENTS[studentId] = {
+        secretKey,
+        name: name || studentId,
+        email: email || ''
+      }
     }
 
     res.json({
@@ -149,8 +178,7 @@ router.post('/verify', async (req, res) => {
       const student = await getStudent(studentId)
       valid = !!student
     } else {
-      // Only demo user valid when Sheets not configured
-      valid = studentId === 'demo'
+      valid = !!DEMO_STUDENTS[studentId]
     }
 
     res.json({ valid })

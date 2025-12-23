@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
-import axios from 'axios'
+import api from '../config/api'
 
 const AuthContext = createContext(null)
 
@@ -30,7 +30,7 @@ export function AuthProvider({ children }) {
     
     try {
       setSyncing(true)
-      const response = await axios.post('/api/progress/sync', { studentId })
+      const response = await api.post('/api/progress/sync', { studentId })
       
       if (response.data.success && response.data.progress) {
         setUser(prev => {
@@ -54,7 +54,7 @@ export function AuthProvider({ children }) {
 
   const login = async (studentId, secretKey) => {
     try {
-      const response = await axios.post('/api/auth/login', {
+      const response = await api.post('/api/auth/login', {
         studentId,
         secretKey
       })
@@ -101,7 +101,7 @@ export function AuthProvider({ children }) {
 
     // Sync to server
     try {
-      await axios.post('/api/progress/update', {
+      await api.post('/api/progress/update', {
         studentId: user.studentId,
         topicId,
         subtopicId,

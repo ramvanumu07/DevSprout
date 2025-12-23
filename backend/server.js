@@ -61,11 +61,7 @@ async function startServer() {
       console.log('⚠️  Google Sheets - Not configured')
     }
     
-    if (!process.env.GOOGLE_SHEET_ID) {
-      console.log('\n📝 Demo login: demo / demo\n')
-    } else {
-      console.log('\n📝 Login with your registered credentials\n')
-    }
+    console.log('\n📝 Demo login: student001 / key123\n')
   })
 }
 

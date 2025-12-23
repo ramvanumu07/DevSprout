@@ -1,119 +1,66 @@
 import express from 'express'
 import axios from 'axios'
-import { readFile } from 'fs/promises'
-import { join, dirname } from 'path'
-import { fileURLToPath } from 'url'
-import {
-  getTaskProgress,
-  saveTaskProgress,
-  saveChatHistory,
-  getChatHistory,
-  getPhase,
-  setPhase,
-  getAssignmentCount,
-  incrementAssignmentCount,
-  resetPhaseState,
-  getSubtopicState
-} from '../services/taskDb.js'
+import { getTaskProgress, saveTaskProgress, saveChatHistory, getChatHistory } from '../services/taskDb.js'
 
 const router = express.Router()
-const __dirname = dirname(fileURLToPath(import.meta.url))
 
-// Cache for prompt files
-let learningPrompt = null
-let assignmentPrompt = null
+// System prompt for the AI tutor
+const SYSTEM_PROMPT = `You are an expert programming mentor teaching JavaScript to absolute beginners.
 
-// Load prompt files
-async function loadPrompts() {
-  if (!learningPrompt) {
-    try {
-      learningPrompt = await readFile(join(__dirname, '../../learning-phase-prompt.txt'), 'utf-8')
-    } catch (error) {
-      console.error('Failed to load learning prompt:', error.message)
-      learningPrompt = getDefaultLearningPrompt()
-    }
-  }
+You are NOT a chatbot that answers random questions.
+You are a structured mentor that follows a predefined curriculum.
 
-  if (!assignmentPrompt) {
-    try {
-      assignmentPrompt = await readFile(join(__dirname, '../../assignment-phase-prompt.txt'), 'utf-8')
-    } catch (error) {
-      console.error('Failed to load assignment prompt:', error.message)
-      assignmentPrompt = getDefaultAssignmentPrompt()
-    }
-  }
+TEACHING PHILOSOPHY:
+1. Assume the student has ZERO DSA knowledge and minimal programming intuition.
+2. Your primary goal is to build logical thinking, not memorization.
+3. Focus on mental execution of code and step-by-step reasoning.
+4. Prevent copy-paste learning.
+5. Teach slowly, clearly, and incrementally.
 
-  return { learningPrompt, assignmentPrompt }
-}
+HOW TO TEACH:
+- Explain concepts using 1-2 very small examples
+- Keep code snippets short (max 5-8 lines)
+- Explain what changes line by line
+- Ask the student to predict outputs before revealing answers
+- Present ONE task at a time
+- After each task, ask the student to explain their logic
+- Provide hints, not full solutions
 
-// Default prompts (fallback)
-function getDefaultLearningPrompt() {
-  return `You are a JavaScript mentor in LEARNING PHASE. Teach through questions, not lectures. 
-Ask one thought-provoking question at a time. Let the student discover concepts.
-When all concepts are covered, include LEARNING_PHASE_COMPLETE in your response.`
-}
+TONE: Calm, encouraging, mentor-like, slightly strict, never verbose.
 
-function getDefaultAssignmentPrompt() {
-  return `You are a JavaScript mentor in ASSIGNMENT PHASE. Give coding assignments and review code strictly.
-Focus on code quality: naming, const vs let, no global scope, readability.
-When an assignment is done well, include ASSIGNMENT_COMPLETE.
-After 3-5 quality assignments, include SUBTOPIC_COMPLETE.`
-}
+IMPORTANT: When the student completes a task correctly, respond with "TASK_COMPLETE" somewhere in your message (hidden from the student, we'll process this).
+When ALL tasks for the subtopic are complete, respond with "SUBTOPIC_COMPLETE" as well.`
 
-// Get context for the current subtopic
-function getSubtopicContext(topicId, subtopicId, subtopicTitle, phase, assignmentCount) {
+// Curriculum data for context
+const getCurriculumContext = (topicId, subtopicId, tasks) => {
   return `
-═══════════════════════════════════════════════════════════════
-CURRENT CONTEXT
-═══════════════════════════════════════════════════════════════
-Topic: ${topicId}
-Subtopic: ${subtopicId}
-Subtopic Title: ${subtopicTitle || subtopicId}
-Current Phase: ${phase.toUpperCase()}
-${phase === 'assignment' ? `Assignments Completed: ${assignmentCount.completed}` : ''}
+Current Topic ID: ${topicId}
+Current Subtopic ID: ${subtopicId}
+Tasks for this lesson:
+${tasks.map((t, i) => `${i + 1}. ${t}`).join('\n')}
 
-Remember: Stay focused on this specific subtopic. Don't jump to other topics.
-`
+Guide the student through these tasks one at a time. Track their progress and move to the next task when they complete one correctly.`
 }
 
 // POST /api/chat - Main chat endpoint
 router.post('/', async (req, res) => {
   try {
-    const {
-      studentId, topicId, subtopicId, message, action, history,
-      // New flexible context format
-      concepts, prerequisites, teachingGoal,
-      // Legacy format (still supported)
-      learningPoints,
-      tasks,
-      subtopicTitle
-    } = req.body
+    const { studentId, topicId, subtopicId, message, action, history } = req.body
 
-    // Build subtopic context object (supports both new and legacy formats)
-    const subtopicContext = {
-      concepts: concepts || [],
-      prerequisites: prerequisites || [],
-      teachingGoal: teachingGoal || '',
-      learningPoints: learningPoints || [],
-      tasks: tasks || []
+    // Get or initialize task progress
+    let taskProgress = await getTaskProgress(studentId, topicId, subtopicId)
+    
+    if (!taskProgress) {
+      taskProgress = { current: 1, completed: 0, total: 0 }
     }
-
-    // Load prompts
-    await loadPrompts()
-
-    // Get current phase and assignment state
-    const state = await getSubtopicState(studentId, topicId, subtopicId)
-    let currentPhase = state.phase
-    let assignmentCount = state.assignments
 
     // Handle lesson start
     if (action === 'start_lesson') {
-      // Reset everything for fresh start
-      await resetPhaseState(studentId, topicId, subtopicId)
-      currentPhase = 'learning'
-      assignmentCount = { completed: 0, total: 0 }
-
-      // Clear chat history
+      // Reset progress for new lesson
+      taskProgress = { current: 1, completed: 0, total: 0 }
+      await saveTaskProgress(studentId, topicId, subtopicId, taskProgress)
+      
+      // Clear chat history for fresh start
       await saveChatHistory(studentId, topicId, subtopicId, [])
 
       const welcomeMessage = await generateAIResponse(
@@ -122,17 +69,13 @@ router.post('/', async (req, res) => {
         subtopicId,
         [],
         'START_LESSON',
-        currentPhase,
-        assignmentCount,
-        subtopicContext,
-        subtopicTitle
+        taskProgress
       )
 
       return res.json({
         success: true,
         message: welcomeMessage,
-        phase: currentPhase,
-        assignmentCount
+        taskProgress
       })
     }
 
@@ -151,36 +94,28 @@ router.post('/', async (req, res) => {
       subtopicId,
       history || [],
       message,
-      currentPhase,
-      assignmentCount,
-      subtopicContext,
-      subtopicTitle
+      taskProgress
     )
 
-    // Process response for phase transitions and markers
+    // Check for task completion markers in AI response
     let responseMessage = aiResponse
-    let phaseChanged = false
     let subtopicComplete = false
+    let justCompleted = null
 
-    // Check for LEARNING_PHASE_COMPLETE - transition to assignment phase
-    if (aiResponse.includes('LEARNING_PHASE_COMPLETE')) {
-      responseMessage = aiResponse.replace(/LEARNING_PHASE_COMPLETE/gi, '').trim()
-      currentPhase = 'assignment'
-      await setPhase(studentId, topicId, subtopicId, 'assignment')
-      phaseChanged = true
+    if (aiResponse.includes('TASK_COMPLETE')) {
+      taskProgress.completed += 1
+      taskProgress.current = taskProgress.completed + 1
+      justCompleted = taskProgress.completed
+      responseMessage = aiResponse.replace(/TASK_COMPLETE/gi, '').trim()
     }
 
-    // Check for ASSIGNMENT_COMPLETE - increment assignment count
-    if (aiResponse.includes('ASSIGNMENT_COMPLETE')) {
-      responseMessage = responseMessage.replace(/ASSIGNMENT_COMPLETE/gi, '').trim()
-      assignmentCount = await incrementAssignmentCount(studentId, topicId, subtopicId)
-    }
-
-    // Check for SUBTOPIC_COMPLETE - subtopic fully mastered
     if (aiResponse.includes('SUBTOPIC_COMPLETE')) {
-      responseMessage = responseMessage.replace(/SUBTOPIC_COMPLETE/gi, '').trim()
       subtopicComplete = true
+      responseMessage = responseMessage.replace(/SUBTOPIC_COMPLETE/gi, '').trim()
     }
+
+    // Save updated progress
+    await saveTaskProgress(studentId, topicId, subtopicId, taskProgress)
 
     // Save chat history
     const updatedHistory = [
@@ -193,9 +128,10 @@ router.post('/', async (req, res) => {
     res.json({
       success: true,
       message: responseMessage,
-      phase: currentPhase,
-      phaseChanged,
-      assignmentCount,
+      taskProgress: {
+        ...taskProgress,
+        justCompleted
+      },
       subtopicComplete
     })
 
@@ -214,13 +150,12 @@ router.get('/history/:studentId/:topicId/:subtopicId', async (req, res) => {
     const { studentId, topicId, subtopicId } = req.params
 
     const history = await getChatHistory(studentId, topicId, subtopicId)
-    const state = await getSubtopicState(studentId, topicId, subtopicId)
+    const taskProgress = await getTaskProgress(studentId, topicId, subtopicId)
 
     res.json({
       success: true,
       history: history || [],
-      phase: state.phase,
-      assignmentCount: state.assignments
+      taskProgress: taskProgress || { current: 1, completed: 0, total: 0 }
     })
 
   } catch (error) {
@@ -233,79 +168,36 @@ router.get('/history/:studentId/:topicId/:subtopicId', async (req, res) => {
 })
 
 // Generate AI response using Groq
-async function generateAIResponse(studentId, topicId, subtopicId, history, userMessage, phase, assignmentCount, subtopicContext = {}, subtopicTitle = '') {
+async function generateAIResponse(studentId, topicId, subtopicId, history, userMessage, taskProgress) {
   const GROQ_API_KEY = process.env.GROQ_API_KEY
-
-  // Extract context (supports both new format and legacy learningPoints)
-  const { concepts, prerequisites, teachingGoal, learningPoints, tasks } = subtopicContext
 
   // If no API key, return a helpful fallback message
   if (!GROQ_API_KEY) {
-    return `The AI tutor isn't configured yet. Please add your GROQ_API_KEY to the .env file.
+    if (userMessage === 'START_LESSON') {
+      return `Welcome! Let's learn this topic together.
+
+I'll guide you through the tasks step by step. Since the AI tutor isn't configured yet, I'll provide basic guidance.
+
+**Tip:** To enable the full AI tutor experience, add your GROQ_API_KEY to the .env file.
+
+Ready to begin? Tell me what you know about this topic!`
+    }
+    return `Thanks for your response! 
+
+Since the AI tutor isn't fully configured (missing GROQ_API_KEY), I can't provide detailed feedback right now.
 
 **To enable AI tutoring:**
 1. Get a free API key from https://console.groq.com
-2. Add it to your backend/.env file as GROQ_API_KEY`
+2. Add it to your backend/.env file as GROQ_API_KEY
+
+Keep practicing and try again once the API is set up!`
   }
 
   try {
-    // Select the appropriate system prompt based on phase
-    const systemPrompt = phase === 'learning' ? learningPrompt : assignmentPrompt
-    const context = getSubtopicContext(topicId, subtopicId, subtopicTitle, phase, assignmentCount)
-
     const messages = [
-      { role: 'system', content: systemPrompt },
-      { role: 'system', content: context }
+      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'system', content: getCurriculumContext(topicId, subtopicId, []) }
     ]
-
-    // Add learning context for learning phase - PRINCIPLES, NOT PROCEDURES
-    if (phase === 'learning') {
-      let learningContext = `
-【 TEACHING CONTEXT - NOT A SCRIPT 】
-Subtopic: ${subtopicTitle || subtopicId}`
-
-      if (concepts && concepts.length > 0) {
-        learningContext += `
-
-Key concepts to cover: ${concepts.join(', ')}`
-      } else if (learningPoints && learningPoints.length > 0) {
-        // Legacy format fallback
-        learningContext += `
-
-Key concepts to cover: ${learningPoints.join(', ')}`
-      }
-
-      if (prerequisites && prerequisites.length > 0) {
-        learningContext += `
-
-Prerequisites they should know: ${prerequisites.join(', ')}`
-      }
-
-      if (teachingGoal) {
-        learningContext += `
-
-Teaching goal: ${teachingGoal}`
-      }
-
-      learningContext += `
-
-Remember: This is guidance, not a script. The number of questions depends on how the user responds.
-Adapt your approach based on their understanding. Read the room.`
-
-      messages.push({ role: 'system', content: learningContext })
-    }
-
-    // Add tasks context for assignment phase
-    if (phase === 'assignment' && tasks && tasks.length > 0) {
-      messages.push({
-        role: 'system',
-        content: `
-【 AVAILABLE ASSIGNMENTS FOR THIS SUBTOPIC 】
-${tasks.map((t, i) => `${i + 1}. ${t}`).join('\n')}
-
-Give assignments based on these. You can modify or expand on them. Focus on code quality review.`
-      })
-    }
 
     // Add conversation history
     if (history && history.length > 0) {
@@ -318,20 +210,19 @@ Give assignments based on these. You can modify or expand on them. Focus on code
 
     // Add current message
     if (userMessage === 'START_LESSON') {
-      if (phase === 'learning') {
-        messages.push({
-          role: 'user',
-          content: `I want to learn about "${subtopicTitle || subtopicId}". Let's start the learning session.`
-        })
-      } else {
-        messages.push({
-          role: 'user',
-          content: `I'm ready for assignments on "${subtopicTitle || subtopicId}". Give me my first challenge.`
-        })
-      }
+      messages.push({
+        role: 'user',
+        content: 'I want to start learning this topic. Please introduce it and give me my first task.'
+      })
     } else {
       messages.push({ role: 'user', content: userMessage })
     }
+
+    // Add task progress context
+    messages.push({
+      role: 'system',
+      content: `Current task progress: Task ${taskProgress.current} of ${taskProgress.total || 'unknown'}. Completed: ${taskProgress.completed} tasks.`
+    })
 
     const response = await axios.post(
       'https://api.groq.com/openai/v1/chat/completions',
@@ -353,8 +244,19 @@ Give assignments based on these. You can modify or expand on them. Focus on code
 
   } catch (error) {
     console.error('Groq API error:', error.response?.data || error.message)
+    
+    // Return a fallback message on API error
+    if (userMessage === 'START_LESSON') {
+      return `Welcome! Let's dive into this topic.
 
-    return `I'm having trouble connecting to the AI service right now. Please try again in a moment.`
+I'm having some trouble connecting to the AI service right now, but don't let that stop you!
+
+Start by thinking about the problem and try writing some code. Share your approach and I'll do my best to help.`
+    }
+    
+    return `I received your message but I'm having trouble processing it right now. 
+
+Please try again in a moment, or continue working on the task and share your code when you're ready.`
   }
 }
 

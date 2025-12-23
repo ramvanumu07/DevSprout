@@ -6,6 +6,20 @@ const router = express.Router()
 // In-memory fallback store (when Google Sheets not configured)
 const progressStore = new Map()
 
+// Initialize demo data
+progressStore.set('student001', {
+  progress: {
+    'arrays': {
+      subtopics: {
+        'arrays-intro': true,
+        'arrays-operations': true
+      }
+    }
+  },
+  streak: 5,
+  totalHours: 12
+})
+
 // GET /api/progress/:studentId
 router.get('/:studentId', async (req, res) => {
   try {
