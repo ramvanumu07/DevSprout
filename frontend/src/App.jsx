@@ -1,8 +1,10 @@
 import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate } from 'react-router-dom'
+import { useEffect } from 'react'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 import Chat from './pages/Chat'
+import { API_URL } from './config/api'
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth()
@@ -51,6 +53,11 @@ function AppRoutes() {
 }
 
 function App() {
+  // Pre-warm the backend on app load (helps with Render cold starts)
+  useEffect(() => {
+    fetch(`${API_URL}/health`).catch(() => {})
+  }, [])
+
   return (
     <Router>
       <AuthProvider>
