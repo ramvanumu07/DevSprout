@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useAuth } from '../contexts/AuthContext'
-import { getTopicById, getSubtopicById, calculateProgress } from '../data/curriculum'
+import { getTopicById, getSubtopicById } from '../data/curriculum'
 import api from '../config/api'
 import { 
   ArrowLeft, 
@@ -12,66 +12,65 @@ import {
   RotateCcw,
   Menu,
   X,
-  HelpCircle
+  HelpCircle,
+  BookOpen,
+  Code,
+  AlertCircle,
+  Clock
 } from 'lucide-react'
 
 export default function Chat() {
   const { topicId, subtopicId } = useParams()
   const navigate = useNavigate()
-  const { user, updateProgress } = useAuth()
+  const { user } = useAuth()
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [showSidebar, setShowSidebar] = useState(false)
   const [lessonStarted, setLessonStarted] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
-  const [taskProgress, setTaskProgress] = useState({ current: 1, completed: 0, total: 0 })
+  const [phase, setPhase] = useState('learning') // 'learning' or 'assignment'
+  const [assignmentsCompleted, setAssignmentsCompleted] = useState(0)
+  const [error, setError] = useState(null)
+  const [rateLimitInfo, setRateLimitInfo] = useState(null)
   const messagesEndRef = useRef(null)
   const inputRef = useRef(null)
 
   const topic = getTopicById(topicId)
   const subtopic = getSubtopicById(topicId, subtopicId)
-  const progress = calculateProgress(user?.progress || {})
-
-  const isSubtopicCompleted = (tId, sId) => {
-    return user?.progress?.[tId]?.subtopics?.[sId] || false
-  }
 
   const currentSubtopicIndex = topic?.subtopics?.findIndex(s => s.id === subtopicId) || 0
   const nextSubtopic = topic?.subtopics?.[currentSubtopicIndex + 1]
   const prevSubtopic = topic?.subtopics?.[currentSubtopicIndex - 1]
 
-  // Initialize task progress from subtopic
-  useEffect(() => {
-    if (subtopic?.tasks) {
-      setTaskProgress(prev => ({ ...prev, total: subtopic.tasks.length }))
-    }
-  }, [subtopic])
-
   // Load existing chat history when subtopic changes
   useEffect(() => {
-    if (subtopic && user?.studentId) {
+    if (subtopic && user) {
       loadChatHistory()
     }
-  }, [subtopicId, user?.studentId])
+  }, [subtopicId, user?.id])
 
   const loadChatHistory = async () => {
     setIsLoading(true)
+    setError(null)
+    
     try {
-      const response = await api.get(`/api/chat/history/${user.studentId}/${topicId}/${subtopicId}`)
+      const response = await api.get(`/api/chat/history/${topicId}/${subtopicId}`)
       
       if (response.data.history && response.data.history.length > 0) {
-        // Has existing history - resume session
         setMessages(response.data.history)
-        setTaskProgress(response.data.taskProgress)
+        setPhase(response.data.phase || 'learning')
+        setAssignmentsCompleted(response.data.assignmentsCompleted || 0)
         setLessonStarted(true)
       } else {
-        // No history - start fresh lesson
         startLesson()
       }
-    } catch (error) {
-      console.error('Failed to load chat history:', error)
-      // Fallback to starting fresh
+    } catch (err) {
+      console.error('Failed to load chat history:', err)
+      if (err.response?.status === 403 && err.response?.data?.code === 'SUBSCRIPTION_REQUIRED') {
+        navigate('/subscribe')
+        return
+      }
       startLesson()
     }
     setIsLoading(false)
@@ -88,33 +87,36 @@ export default function Chat() {
   const startLesson = async (isRestart = false) => {
     setLessonStarted(true)
     setMessages([])
-    setTaskProgress({ current: 1, completed: 0, total: subtopic?.tasks?.length || 0 })
+    setPhase('learning')
+    setAssignmentsCompleted(0)
+    setError(null)
     if (!isRestart) setIsLoading(true)
 
     try {
       const response = await api.post('/api/chat', {
-        studentId: user?.studentId,
         topicId,
         subtopicId,
-        action: 'start_lesson'
+        action: 'start_lesson',
+        subtopicData: {
+          title: subtopic?.title,
+          concepts: subtopic?.concepts,
+          prerequisites: subtopic?.prerequisites,
+          teachingGoal: subtopic?.teachingGoal,
+          tasks: subtopic?.tasks
+        }
       })
 
       setMessages([{
         role: 'assistant',
-        content: response.data.message || getDefaultWelcomeMessage(),
+        content: response.data.message,
         timestamp: new Date().toISOString()
       }])
+      
+      setPhase(response.data.phase || 'learning')
+      setRateLimitInfo(response.data.rateLimit)
 
-      if (response.data.taskProgress) {
-        setTaskProgress(response.data.taskProgress)
-      }
-    } catch (error) {
-      console.error('Failed to start lesson:', error)
-      setMessages([{
-        role: 'assistant',
-        content: getDefaultWelcomeMessage(),
-        timestamp: new Date().toISOString()
-      }])
+    } catch (err) {
+      handleApiError(err)
     }
 
     setIsLoading(false)
@@ -124,14 +126,36 @@ export default function Chat() {
     startLesson(true)
   }
 
-  const getDefaultWelcomeMessage = () => {
-    const tasks = subtopic?.tasks || []
-    return `Hey! Let's learn **${subtopic?.title}**.
-
-${tasks.length > 0 ? `**Tasks to complete:**
-${tasks.map((t, i) => `${i + 1}. ${t}`).join('\n')}
-
-Let's start with **Task 1**. Write your code and explain your thinking!` : `Show me what you know or ask me anything!`}`
+  const handleApiError = (err) => {
+    console.error('API Error:', err)
+    
+    if (err.response?.status === 429) {
+      setError({
+        type: 'rate_limit',
+        message: err.response?.data?.message || 'Too many requests. Please wait a moment.',
+        retryAfter: err.response?.data?.retryAfter
+      })
+      return
+    }
+    
+    if (err.response?.status === 503) {
+      setError({
+        type: 'queue_full',
+        message: 'Server is very busy. Please try again in a moment.'
+      })
+      return
+    }
+    
+    if (err.response?.status === 403 && err.response?.data?.code === 'SUBSCRIPTION_REQUIRED') {
+      navigate('/subscribe')
+      return
+    }
+    
+    setMessages(prev => [...prev, {
+      role: 'assistant',
+      content: "I'm having trouble connecting. Please try again.",
+      timestamp: new Date().toISOString()
+    }])
   }
 
   const handleSend = async () => {
@@ -139,6 +163,7 @@ Let's start with **Task 1**. Write your code and explain your thinking!` : `Show
 
     const userMessage = input.trim()
     setInput('')
+    setError(null)
     
     setMessages(prev => [...prev, {
       role: 'user',
@@ -150,51 +175,66 @@ Let's start with **Task 1**. Write your code and explain your thinking!` : `Show
 
     try {
       const response = await api.post('/api/chat', {
-        studentId: user?.studentId,
         topicId,
         subtopicId,
         message: userMessage,
-        history: messages.filter(m => m.role !== 'system')
+        subtopicData: {
+          title: subtopic?.title,
+          concepts: subtopic?.concepts,
+          prerequisites: subtopic?.prerequisites,
+          teachingGoal: subtopic?.teachingGoal,
+          tasks: subtopic?.tasks
+        }
       })
 
-      // Update task progress
-      if (response.data.taskProgress) {
-        setTaskProgress(response.data.taskProgress)
-
-        // Show task completion message
-        if (response.data.taskProgress.justCompleted) {
+      // Handle phase transition
+      if (response.data.phase && response.data.phase !== phase) {
+        const newPhase = response.data.phase
+        setPhase(newPhase)
+        
+        // Show phase transition message
+        if (newPhase === 'assignment') {
           setMessages(prev => [...prev, {
             role: 'system',
-            content: `✅ **Task ${response.data.taskProgress.justCompleted} Complete!** (${response.data.taskProgress.completed}/${response.data.taskProgress.total})`,
+            content: '📚 **Learning Phase Complete!** Now let\'s practice with some assignments.',
             timestamp: new Date().toISOString()
           }])
         }
       }
 
+      // Handle assignment completion
+      if (response.data.assignmentsCompleted > assignmentsCompleted) {
+        setAssignmentsCompleted(response.data.assignmentsCompleted)
+        setMessages(prev => [...prev, {
+          role: 'system',
+          content: `✅ **Assignment ${response.data.assignmentsCompleted} Complete!**`,
+          timestamp: new Date().toISOString()
+        }])
+      }
+
+      // Add AI response
       setMessages(prev => [...prev, {
         role: 'assistant',
         content: response.data.message,
         timestamp: new Date().toISOString()
       }])
 
-      // Auto-complete subtopic when all tasks done
-      if (response.data.subtopicComplete && !isSubtopicCompleted(topicId, subtopicId)) {
-        updateProgress(topicId, subtopicId, true)
+      // Handle subtopic completion
+      if (response.data.subtopicComplete) {
         setTimeout(() => {
           setMessages(prev => [...prev, {
             role: 'system',
-            content: '🎉 **Lesson Complete!** All tasks finished. You\'ve mastered this topic!',
+            content: '🎉 **Lesson Complete!** You\'ve mastered this topic!',
             timestamp: new Date().toISOString()
           }])
         }, 500)
       }
-    } catch (error) {
-      console.error('Chat error:', error)
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        content: "I'm having trouble connecting. Please try again.",
-        timestamp: new Date().toISOString()
-      }])
+
+      // Update rate limit info
+      setRateLimitInfo(response.data.rateLimit)
+
+    } catch (err) {
+      handleApiError(err)
     }
 
     setIsLoading(false)
@@ -215,12 +255,12 @@ Let's start with **Task 1**. Write your code and explain your thinking!` : `Show
 
   if (!topic || !subtopic) {
     return (
-      <div className="min-h-screen bg-white flex items-center justify-center">
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center">
         <div className="text-center">
-          <p className="text-[#6e6e6e]">Topic not found</p>
+          <p className="text-slate-400">Topic not found</p>
           <button
             onClick={() => navigate('/dashboard')}
-            className="mt-4 px-4 py-2 bg-[#0d0d0d] text-white rounded-lg"
+            className="mt-4 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-500 transition-colors"
           >
             Back to Dashboard
           </button>
@@ -230,36 +270,35 @@ Let's start with **Task 1**. Write your code and explain your thinking!` : `Show
   }
 
   return (
-    <div className="h-screen bg-white flex">
+    <div className="h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex">
       {/* Sidebar */}
-      <aside className={`fixed inset-y-0 left-0 z-50 w-64 bg-[#f9f9f9] border-r border-[#e5e5e5] transform transition-transform duration-200 ease-in-out lg:relative lg:translate-x-0 ${showSidebar ? 'translate-x-0' : '-translate-x-full'}`}>
+      <aside className={`fixed inset-y-0 left-0 z-50 w-64 bg-slate-800/80 backdrop-blur border-r border-slate-700/50 transform transition-transform duration-200 ease-in-out lg:relative lg:translate-x-0 ${showSidebar ? 'translate-x-0' : '-translate-x-full'}`}>
         <div className="flex flex-col h-full">
           {/* Header */}
-          <div className="p-4 border-b border-[#e5e5e5] flex items-center justify-between">
+          <div className="p-4 border-b border-slate-700/50 flex items-center justify-between">
             <button
               onClick={() => navigate('/dashboard')}
-              className="flex items-center gap-2 text-[#6e6e6e] hover:text-[#0d0d0d] transition-colors"
+              className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors"
             >
               <ArrowLeft className="w-4 h-4" />
               <span className="text-sm">Back</span>
             </button>
             <button 
               onClick={() => setShowSidebar(false)}
-              className="lg:hidden p-1 hover:bg-[#e5e5e5] rounded"
+              className="lg:hidden p-1 hover:bg-slate-700 rounded"
             >
-              <X className="w-5 h-5 text-[#6e6e6e]" />
+              <X className="w-5 h-5 text-slate-400" />
             </button>
           </div>
 
           {/* Topic Title */}
-          <div className="p-4 border-b border-[#e5e5e5]">
-            <span className="text-[#0d0d0d] font-medium">{topic.title}</span>
+          <div className="p-4 border-b border-slate-700/50">
+            <span className="text-white font-medium">{topic.title}</span>
           </div>
 
           {/* Subtopics */}
           <div className="flex-1 overflow-y-auto p-2">
             {topic.subtopics.map((sub) => {
-              const completed = isSubtopicCompleted(topicId, sub.id)
               const isCurrent = sub.id === subtopicId
               
               return (
@@ -267,14 +306,12 @@ Let's start with **Task 1**. Write your code and explain your thinking!` : `Show
                   key={sub.id}
                   onClick={() => navigateToSubtopic(sub.id)}
                   className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left text-sm transition-colors ${
-                    isCurrent ? 'bg-[#e5e5e5] text-[#0d0d0d]' : 'text-[#6e6e6e] hover:bg-[#e5e5e5]'
+                    isCurrent 
+                      ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' 
+                      : 'text-slate-400 hover:bg-slate-700/50 hover:text-white'
                   }`}
                 >
-                  {completed ? (
-                    <CheckCircle2 className="w-4 h-4 text-[#0d0d0d] flex-shrink-0" />
-                  ) : (
-                    <Circle className="w-4 h-4 flex-shrink-0" />
-                  )}
+                  <Circle className="w-4 h-4 flex-shrink-0" />
                   <span className="truncate">{sub.title}</span>
                 </button>
               )
@@ -282,16 +319,10 @@ Let's start with **Task 1**. Write your code and explain your thinking!` : `Show
           </div>
 
           {/* Actions */}
-          <div className="p-4 border-t border-[#e5e5e5]">
-            {isSubtopicCompleted(topicId, subtopicId) && (
-              <div className="flex items-center gap-2 text-sm text-[#0d0d0d] bg-[#e5e5e5] px-3 py-2 rounded-lg mb-2">
-                <CheckCircle2 className="w-4 h-4" />
-                <span>Completed</span>
-              </div>
-            )}
+          <div className="p-4 border-t border-slate-700/50">
             <button
               onClick={restartLesson}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-[#f0f0f0] text-[#6e6e6e] text-sm rounded-lg hover:bg-[#e5e5e5] transition-colors"
+              className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-slate-700/50 text-slate-300 text-sm rounded-lg hover:bg-slate-700 transition-colors"
             >
               <RotateCcw className="w-4 h-4" />
               Restart Lesson
@@ -303,7 +334,7 @@ Let's start with **Task 1**. Write your code and explain your thinking!` : `Show
       {/* Overlay */}
       {showSidebar && (
         <div 
-          className="fixed inset-0 bg-black/20 z-40 lg:hidden"
+          className="fixed inset-0 bg-black/50 z-40 lg:hidden"
           onClick={() => setShowSidebar(false)}
         />
       )}
@@ -311,16 +342,35 @@ Let's start with **Task 1**. Write your code and explain your thinking!` : `Show
       {/* Main Chat Area */}
       <main className="flex-1 flex flex-col min-h-0">
         {/* Top Bar */}
-        <header className="h-14 border-b border-[#e5e5e5] px-4 flex items-center gap-4">
+        <header className="h-14 border-b border-slate-700/50 px-4 flex items-center gap-4 bg-slate-800/30 backdrop-blur">
           <button 
             onClick={() => setShowSidebar(true)}
-            className="lg:hidden p-2 hover:bg-[#f5f5f5] rounded-lg"
+            className="lg:hidden p-2 hover:bg-slate-700/50 rounded-lg"
           >
-            <Menu className="w-5 h-5 text-[#0d0d0d]" />
+            <Menu className="w-5 h-5 text-slate-300" />
           </button>
           
           <div className="flex-1 min-w-0">
-            <h1 className="text-[#0d0d0d] font-medium truncate">{subtopic.title}</h1>
+            <h1 className="text-white font-medium truncate">{subtopic.title}</h1>
+          </div>
+
+          {/* Phase Indicator */}
+          <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm ${
+            phase === 'learning' 
+              ? 'bg-blue-500/20 text-blue-400' 
+              : 'bg-purple-500/20 text-purple-400'
+          }`}>
+            {phase === 'learning' ? (
+              <>
+                <BookOpen className="w-4 h-4" />
+                <span className="hidden sm:inline">Learning</span>
+              </>
+            ) : (
+              <>
+                <Code className="w-4 h-4" />
+                <span className="hidden sm:inline">Practice</span>
+              </>
+            )}
           </div>
 
           {/* Help Button */}
@@ -329,7 +379,7 @@ Let's start with **Task 1**. Write your code and explain your thinking!` : `Show
               onMouseEnter={() => setShowHelp(true)}
               onMouseLeave={() => setShowHelp(false)}
               onClick={() => setShowHelp(!showHelp)}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-[#6e6e6e] hover:text-[#0d0d0d] hover:bg-[#f5f5f5] rounded-lg transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-slate-400 hover:text-white hover:bg-slate-700/50 rounded-lg transition-colors"
             >
               <HelpCircle className="w-4 h-4" />
               <span className="hidden sm:inline">How to run JS?</span>
@@ -342,27 +392,24 @@ Let's start with **Task 1**. Write your code and explain your thinking!` : `Show
                   initial={{ opacity: 0, y: 5 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: 5 }}
-                  className="absolute right-0 top-full mt-2 w-72 bg-[#0d0d0d] text-white rounded-xl p-4 shadow-xl z-50"
+                  className="absolute right-0 top-full mt-2 w-72 bg-slate-800 border border-slate-700 text-white rounded-xl p-4 shadow-xl z-50"
                   onMouseEnter={() => setShowHelp(true)}
                   onMouseLeave={() => setShowHelp(false)}
                 >
                   <p className="font-medium mb-3">How to run JavaScript</p>
-                  <div className="space-y-3 text-sm text-gray-300">
+                  <div className="space-y-3 text-sm text-slate-300">
                     <div>
                       <p className="text-white font-medium mb-1">1. Create a file</p>
-                      <code className="block bg-white/10 rounded px-2 py-1 text-xs">hello.js</code>
+                      <code className="block bg-slate-700 rounded px-2 py-1 text-xs">hello.js</code>
                     </div>
                     <div>
                       <p className="text-white font-medium mb-1">2. Write your code</p>
-                      <code className="block bg-white/10 rounded px-2 py-1 text-xs">console.log("Hello!");</code>
+                      <code className="block bg-slate-700 rounded px-2 py-1 text-xs">console.log("Hello!");</code>
                     </div>
                     <div>
                       <p className="text-white font-medium mb-1">3. Run in terminal</p>
-                      <code className="block bg-white/10 rounded px-2 py-1 text-xs">node hello.js</code>
+                      <code className="block bg-slate-700 rounded px-2 py-1 text-xs">node hello.js</code>
                     </div>
-                  </div>
-                  <div className="mt-3 pt-3 border-t border-white/20 text-xs text-gray-400">
-                    Make sure Node.js is installed on your computer
                   </div>
                 </motion.div>
               )}
@@ -370,8 +417,28 @@ Let's start with **Task 1**. Write your code and explain your thinking!` : `Show
           </div>
         </header>
 
+        {/* Error Banner */}
+        {error && (
+          <div className={`px-4 py-3 flex items-center gap-3 ${
+            error.type === 'rate_limit' ? 'bg-amber-500/20 text-amber-400' : 'bg-red-500/20 text-red-400'
+          }`}>
+            {error.type === 'rate_limit' ? (
+              <Clock className="w-5 h-5 flex-shrink-0" />
+            ) : (
+              <AlertCircle className="w-5 h-5 flex-shrink-0" />
+            )}
+            <span className="text-sm">{error.message}</span>
+            <button 
+              onClick={() => setError(null)}
+              className="ml-auto p-1 hover:bg-white/10 rounded"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto bg-[#f9f9f9]">
+        <div className="flex-1 overflow-y-auto">
           <div className="max-w-3xl mx-auto px-4 py-6">
             <AnimatePresence>
               {messages.map((message, index) => (
@@ -386,9 +453,9 @@ Let's start with **Task 1**. Write your code and explain your thinking!` : `Show
                       initial={{ scale: 0.9 }}
                       animate={{ scale: 1 }}
                       className={`px-4 py-3 rounded-xl text-center text-sm font-medium ${
-                        message.content.includes('Complete!') 
-                          ? 'bg-green-50 border border-green-200 text-green-800'
-                          : 'bg-blue-50 border border-blue-200 text-blue-800'
+                        message.content.includes('Complete') 
+                          ? 'bg-emerald-500/20 border border-emerald-500/30 text-emerald-400'
+                          : 'bg-blue-500/20 border border-blue-500/30 text-blue-400'
                       }`}
                     >
                       <MessageContent content={message.content} />
@@ -397,16 +464,24 @@ Let's start with **Task 1**. Write your code and explain your thinking!` : `Show
                     <div className={`${message.role === 'user' ? 'max-w-[80%]' : 'w-full'}`}>
                       {message.role === 'assistant' && (
                         <div className="flex items-center gap-2 mb-2">
-                          <div className="w-6 h-6 rounded-full bg-[#0d0d0d] flex items-center justify-center">
-                            <span className="text-white text-xs font-medium">AI</span>
+                          <div className={`w-6 h-6 rounded-full flex items-center justify-center ${
+                            phase === 'learning' ? 'bg-blue-500' : 'bg-purple-500'
+                          }`}>
+                            {phase === 'learning' ? (
+                              <BookOpen className="w-3 h-3 text-white" />
+                            ) : (
+                              <Code className="w-3 h-3 text-white" />
+                            )}
                           </div>
-                          <span className="text-sm text-[#6e6e6e]">Tutor</span>
+                          <span className="text-sm text-slate-400">
+                            {phase === 'learning' ? 'Mentor' : 'Reviewer'}
+                          </span>
                         </div>
                       )}
                       <div className={`rounded-2xl px-4 py-3 ${
                         message.role === 'user' 
-                          ? 'bg-[#0d0d0d] text-white' 
-                          : 'bg-white border border-[#e5e5e5] text-[#0d0d0d]'
+                          ? 'bg-emerald-600 text-white' 
+                          : 'bg-slate-800/80 border border-slate-700/50 text-slate-200'
                       }`}>
                         {message.role === 'user' ? (
                           <p className="whitespace-pre-wrap">{message.content}</p>
@@ -427,13 +502,19 @@ Let's start with **Task 1**. Write your code and explain your thinking!` : `Show
                 animate={{ opacity: 1 }}
                 className="flex items-center gap-2 mb-6"
               >
-                <div className="w-6 h-6 rounded-full bg-[#0d0d0d] flex items-center justify-center">
-                  <span className="text-white text-xs font-medium">AI</span>
+                <div className={`w-6 h-6 rounded-full flex items-center justify-center ${
+                  phase === 'learning' ? 'bg-blue-500' : 'bg-purple-500'
+                }`}>
+                  {phase === 'learning' ? (
+                    <BookOpen className="w-3 h-3 text-white" />
+                  ) : (
+                    <Code className="w-3 h-3 text-white" />
+                  )}
                 </div>
                 <div className="flex items-center gap-1">
-                  <div className="w-2 h-2 bg-[#c5c5c5] rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                  <div className="w-2 h-2 bg-[#c5c5c5] rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                  <div className="w-2 h-2 bg-[#c5c5c5] rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                  <div className="w-2 h-2 bg-slate-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <div className="w-2 h-2 bg-slate-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                  <div className="w-2 h-2 bg-slate-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
                 </div>
               </motion.div>
             )}
@@ -443,7 +524,7 @@ Let's start with **Task 1**. Write your code and explain your thinking!` : `Show
         </div>
 
         {/* Input Area */}
-        <div className="border-t border-[#e5e5e5] p-4 bg-white">
+        <div className="border-t border-slate-700/50 p-4 bg-slate-800/30 backdrop-blur">
           <div className="max-w-3xl mx-auto">
             <div className="flex gap-3">
               <div className="flex-1 relative">
@@ -454,32 +535,39 @@ Let's start with **Task 1**. Write your code and explain your thinking!` : `Show
                   onKeyPress={handleKeyPress}
                   placeholder="Type your code or answer..."
                   rows={1}
-                  className="w-full bg-white border border-[#c5c5c5] rounded-xl py-3 px-4 text-[#0d0d0d] placeholder:text-[#8e8e8e] focus:outline-none focus:border-[#0d0d0d] focus:ring-1 focus:ring-[#0d0d0d] transition-colors resize-none"
+                  className="w-full bg-slate-900/50 border border-slate-600 rounded-xl py-3 px-4 text-white placeholder:text-slate-500 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors resize-none"
                   style={{ minHeight: '48px', maxHeight: '200px' }}
                 />
               </div>
               <button
                 onClick={handleSend}
                 disabled={!input.trim() || isLoading}
-                className="px-4 bg-[#0d0d0d] text-white rounded-xl flex items-center justify-center disabled:opacity-30 disabled:cursor-not-allowed hover:bg-[#2d2d2d] transition-colors"
+                className="px-4 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl flex items-center justify-center disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
               >
                 <Send className="w-5 h-5" />
               </button>
             </div>
 
-            {/* Navigation */}
+            {/* Navigation & Rate Limit Info */}
             <div className="flex items-center justify-between mt-3 text-sm">
               <button
                 onClick={() => prevSubtopic && navigateToSubtopic(prevSubtopic.id)}
                 disabled={!prevSubtopic}
-                className="text-[#6e6e6e] hover:text-[#0d0d0d] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                className="text-slate-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
               >
                 ← Previous
               </button>
+              
+              {rateLimitInfo && (
+                <span className="text-slate-500 text-xs">
+                  {rateLimitInfo.remaining} requests remaining
+                </span>
+              )}
+              
               <button
                 onClick={() => nextSubtopic && navigateToSubtopic(nextSubtopic.id)}
                 disabled={!nextSubtopic}
-                className="text-[#6e6e6e] hover:text-[#0d0d0d] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                className="text-slate-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
               >
                 Next →
               </button>
@@ -491,7 +579,7 @@ Let's start with **Task 1**. Write your code and explain your thinking!` : `Show
   )
 }
 
-// Message content renderer
+// Message content renderer (dark theme)
 function MessageContent({ content }) {
   const parseContent = (text) => {
     const lines = text.split('\n')
@@ -509,14 +597,14 @@ function MessageContent({ content }) {
         } else {
           inCodeBlock = false
           elements.push(
-            <div key={i} className="my-3 bg-[#f7f7f8] rounded-lg overflow-hidden border border-[#e5e5e5]">
+            <div key={i} className="my-3 bg-slate-900/80 rounded-lg overflow-hidden border border-slate-700/50">
               {codeLanguage && (
-                <div className="px-3 py-1 bg-[#efefef] text-xs text-[#6e6e6e] border-b border-[#e5e5e5]">
+                <div className="px-3 py-1 bg-slate-800 text-xs text-slate-400 border-b border-slate-700/50">
                   {codeLanguage}
                 </div>
               )}
               <pre className="p-3 overflow-x-auto">
-                <code className="text-sm text-[#0d0d0d]">
+                <code className="text-sm text-emerald-400">
                   {codeContent.join('\n')}
                 </code>
               </pre>
@@ -532,33 +620,32 @@ function MessageContent({ content }) {
       }
 
       if (line.startsWith('# ')) {
-        elements.push(<h1 key={i} className="text-xl font-semibold text-[#0d0d0d] mt-4 mb-2">{formatInline(line.slice(2))}</h1>)
+        elements.push(<h1 key={i} className="text-xl font-semibold text-white mt-4 mb-2">{formatInline(line.slice(2))}</h1>)
         return
       }
       if (line.startsWith('## ')) {
-        elements.push(<h2 key={i} className="text-lg font-semibold text-[#0d0d0d] mt-3 mb-2">{formatInline(line.slice(3))}</h2>)
+        elements.push(<h2 key={i} className="text-lg font-semibold text-white mt-3 mb-2">{formatInline(line.slice(3))}</h2>)
         return
       }
       if (line.startsWith('### ')) {
-        elements.push(<h3 key={i} className="text-base font-semibold text-[#0d0d0d] mt-2 mb-1">{formatInline(line.slice(4))}</h3>)
+        elements.push(<h3 key={i} className="text-base font-semibold text-white mt-2 mb-1">{formatInline(line.slice(4))}</h3>)
         return
       }
       if (line.startsWith('- ') || line.startsWith('* ')) {
         elements.push(
           <div key={i} className="flex items-start gap-2 my-1">
-            <span className="text-[#6e6e6e] mt-1">•</span>
-            <span className="text-[#0d0d0d]">{formatInline(line.slice(2))}</span>
+            <span className="text-slate-500 mt-1">•</span>
+            <span className="text-slate-200">{formatInline(line.slice(2))}</span>
           </div>
         )
         return
       }
-      // Numbered list
       const numberedMatch = line.match(/^(\d+)\.\s(.+)/)
       if (numberedMatch) {
         elements.push(
           <div key={i} className="flex items-start gap-2 my-1">
-            <span className="text-[#6e6e6e] min-w-[1.5rem]">{numberedMatch[1]}.</span>
-            <span className="text-[#0d0d0d]">{formatInline(numberedMatch[2])}</span>
+            <span className="text-slate-500 min-w-[1.5rem]">{numberedMatch[1]}.</span>
+            <span className="text-slate-200">{formatInline(numberedMatch[2])}</span>
           </div>
         )
         return
@@ -567,18 +654,18 @@ function MessageContent({ content }) {
         elements.push(<div key={i} className="h-2" />)
         return
       }
-      elements.push(<p key={i} className="text-[#0d0d0d] my-1">{formatInline(line)}</p>)
+      elements.push(<p key={i} className="text-slate-200 my-1">{formatInline(line)}</p>)
     })
 
     return elements
   }
 
   const formatInline = (text) => {
-    text = text.replace(/\*\*(.*?)\*\*/g, '<strong class="font-semibold">$1</strong>')
+    text = text.replace(/\*\*(.*?)\*\*/g, '<strong class="font-semibold text-white">$1</strong>')
     text = text.replace(/\*(.*?)\*/g, '<em class="italic">$1</em>')
-    text = text.replace(/`(.*?)`/g, '<code class="px-1.5 py-0.5 bg-[#f7f7f8] border border-[#e5e5e5] rounded text-[#0d0d0d] text-sm font-mono">$1</code>')
+    text = text.replace(/`(.*?)`/g, '<code class="px-1.5 py-0.5 bg-slate-700 border border-slate-600 rounded text-emerald-400 text-sm font-mono">$1</code>')
     return <span dangerouslySetInnerHTML={{ __html: text }} />
   }
 
-  return <div className="prose">{parseContent(content)}</div>
+  return <div className="prose prose-invert">{parseContent(content)}</div>
 }

@@ -1,22 +1,31 @@
 import { createClient } from '@supabase/supabase-js'
+import { userCache, subscriptionCache } from './cache.js'
 
 const supabaseUrl = process.env.SUPABASE_URL
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY // Service role key for backend
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY
 
 if (!supabaseUrl || !supabaseServiceKey) {
   console.warn('⚠️ Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_KEY')
 }
 
-// Admin client (for backend operations - bypasses RLS)
+// Admin client with connection pooling settings for scale
 export const supabaseAdmin = createClient(supabaseUrl || '', supabaseServiceKey || '', {
   auth: {
     autoRefreshToken: false,
     persistSession: false
+  },
+  db: {
+    schema: 'public'
+  },
+  global: {
+    headers: {
+      'x-connection-pool': 'true'
+    }
   }
 })
 
 // =====================
-// USER OPERATIONS
+// USER OPERATIONS (with caching)
 // =====================
 
 export async function createUser(email, name) {
@@ -27,6 +36,10 @@ export async function createUser(email, name) {
     .single()
   
   if (error) throw error
+  
+  // Cache the new user
+  userCache.setUser(data.id, data)
+  
   return data
 }
 
@@ -37,11 +50,20 @@ export async function getUserByEmail(email) {
     .eq('email', email)
     .single()
   
-  if (error && error.code !== 'PGRST116') throw error // PGRST116 = not found
+  if (error && error.code !== 'PGRST116') throw error
+  
+  if (data) {
+    userCache.setUser(data.id, data)
+  }
+  
   return data
 }
 
 export async function getUserById(userId) {
+  // Check cache first
+  const cached = userCache.getUser(userId)
+  if (cached) return cached
+  
   const { data, error } = await supabaseAdmin
     .from('users')
     .select('*, subscriptions(*)')
@@ -49,11 +71,15 @@ export async function getUserById(userId) {
     .single()
   
   if (error) throw error
+  
+  // Cache the result
+  userCache.setUser(userId, data)
+  
   return data
 }
 
 // =====================
-// SUBSCRIPTION OPERATIONS
+// SUBSCRIPTION OPERATIONS (with caching)
 // =====================
 
 export async function createSubscription(userId, orderData) {
@@ -65,7 +91,7 @@ export async function createSubscription(userId, orderData) {
     .insert({
       user_id: userId,
       plan: 'basic',
-      status: 'active',
+      status: 'pending', // Pending until payment verified
       amount: orderData.amount,
       razorpay_order_id: orderData.orderId,
       expires_at: expiresAt.toISOString()
@@ -74,6 +100,11 @@ export async function createSubscription(userId, orderData) {
     .single()
   
   if (error) throw error
+  
+  // Invalidate user cache
+  userCache.invalidateUser(userId)
+  subscriptionCache.invalidateSubscription(userId)
+  
   return data
 }
 
@@ -90,10 +121,23 @@ export async function verifyPayment(orderId, paymentId, signature) {
     .single()
   
   if (error) throw error
+  
+  // Invalidate caches
+  if (data) {
+    userCache.invalidateUser(data.user_id)
+    subscriptionCache.invalidateSubscription(data.user_id)
+  }
+  
   return data
 }
 
 export async function checkSubscriptionActive(userId) {
+  // Check cache first
+  const cached = subscriptionCache.getSubscription(userId)
+  if (cached !== null) {
+    return cached.isActive
+  }
+  
   const { data, error } = await supabaseAdmin
     .from('subscriptions')
     .select()
@@ -103,10 +147,22 @@ export async function checkSubscriptionActive(userId) {
     .single()
   
   if (error && error.code !== 'PGRST116') throw error
-  return !!data
+  
+  const isActive = !!data
+  
+  // Cache the result
+  subscriptionCache.setSubscription(userId, { isActive, subscription: data })
+  
+  return isActive
 }
 
 export async function getSubscription(userId) {
+  // Check cache
+  const cached = subscriptionCache.getSubscription(userId)
+  if (cached !== null) {
+    return cached.subscription
+  }
+  
   const { data, error } = await supabaseAdmin
     .from('subscriptions')
     .select()
@@ -116,6 +172,11 @@ export async function getSubscription(userId) {
     .single()
   
   if (error && error.code !== 'PGRST116') throw error
+  
+  // Cache result
+  const isActive = data && data.status === 'active' && new Date(data.expires_at) > new Date()
+  subscriptionCache.setSubscription(userId, { isActive, subscription: data })
+  
   return data
 }
 
@@ -173,7 +234,7 @@ export async function markSubtopicComplete(userId, topicId, subtopicId) {
 }
 
 // =====================
-// CHAT HISTORY OPERATIONS
+// CHAT HISTORY OPERATIONS (with batch insert optimization)
 // =====================
 
 export async function getChatHistory(userId, topicId, subtopicId, limit = 50) {
@@ -226,35 +287,36 @@ export async function clearChatHistory(userId, topicId, subtopicId) {
 export async function trackAIUsage(userId, tokensUsed) {
   const today = new Date().toISOString().split('T')[0]
   
-  // Try to update existing record
-  const { data: existing } = await supabaseAdmin
-    .from('ai_usage')
-    .select()
-    .eq('user_id', userId)
-    .eq('date', today)
-    .single()
-  
-  if (existing) {
-    const { error } = await supabaseAdmin
+  try {
+    // Try to update existing record
+    const { data: existing } = await supabaseAdmin
       .from('ai_usage')
-      .update({
-        tokens_used: existing.tokens_used + tokensUsed,
-        requests_count: existing.requests_count + 1
-      })
-      .eq('id', existing.id)
+      .select()
+      .eq('user_id', userId)
+      .eq('date', today)
+      .single()
     
-    if (error) throw error
-  } else {
-    const { error } = await supabaseAdmin
-      .from('ai_usage')
-      .insert({
-        user_id: userId,
-        tokens_used: tokensUsed,
-        requests_count: 1,
-        date: today
-      })
-    
-    if (error) throw error
+    if (existing) {
+      await supabaseAdmin
+        .from('ai_usage')
+        .update({
+          tokens_used: existing.tokens_used + tokensUsed,
+          requests_count: existing.requests_count + 1
+        })
+        .eq('id', existing.id)
+    } else {
+      await supabaseAdmin
+        .from('ai_usage')
+        .insert({
+          user_id: userId,
+          tokens_used: tokensUsed,
+          requests_count: 1,
+          date: today
+        })
+    }
+  } catch (error) {
+    // Don't fail the request if usage tracking fails
+    console.error('Usage tracking error:', error)
   }
 }
 
@@ -277,9 +339,27 @@ export async function getAIUsageToday(userId) {
 // =====================
 
 export async function getPlatformStats() {
-  const { data, error } = await supabaseAdmin.rpc('get_platform_stats')
-  if (error) throw error
-  return data
+  try {
+    const { data, error } = await supabaseAdmin.rpc('get_platform_stats')
+    if (error) throw error
+    return data
+  } catch (error) {
+    // Fallback if RPC doesn't exist
+    const [users, subs, progress, messages] = await Promise.all([
+      supabaseAdmin.from('users').select('*', { count: 'exact', head: true }),
+      supabaseAdmin.from('subscriptions').select('amount').eq('status', 'active').not('razorpay_payment_id', 'is', null),
+      supabaseAdmin.from('progress').select('*', { count: 'exact', head: true }).eq('status', 'completed'),
+      supabaseAdmin.from('chat_history').select('*', { count: 'exact', head: true }).gte('created_at', new Date().toISOString().split('T')[0])
+    ])
+    
+    return {
+      total_users: users.count || 0,
+      active_subscriptions: subs.data?.length || 0,
+      total_revenue: subs.data?.reduce((sum, s) => sum + (s.amount || 0), 0) || 0,
+      lessons_completed: progress.count || 0,
+      messages_today: messages.count || 0
+    }
+  }
 }
 
 export async function getAllUsers(limit = 100, offset = 0) {
@@ -316,10 +396,14 @@ export async function makeAdmin(userId) {
 }
 
 // =====================
-// INITIALIZATION CHECK
+// CONNECTION CHECK
 // =====================
 
 export async function checkConnection() {
+  if (!supabaseUrl || !supabaseServiceKey) {
+    return false
+  }
+  
   try {
     const { error } = await supabaseAdmin.from('users').select('id').limit(1)
     if (error) throw error
@@ -329,4 +413,3 @@ export async function checkConnection() {
     return false
   }
 }
-

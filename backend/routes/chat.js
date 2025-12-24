@@ -10,12 +10,10 @@ import {
   trackAIUsage,
   getAIUsageToday
 } from '../services/supabase.js'
+import { rateLimiter } from '../services/rateLimiter.js'
+import { progressCache } from '../services/cache.js'
 
 const router = express.Router()
-
-// Rate limits
-const DAILY_REQUEST_LIMIT = 500 // requests per user per day
-const DAILY_TOKEN_LIMIT = 500000 // tokens per user per day
 
 // Learning Phase System Prompt
 const LEARNING_PHASE_PROMPT = `You are an expert programming mentor teaching JavaScript to absolute beginners.
@@ -88,34 +86,19 @@ When ALL assignments are done:
 
 TONE: Slightly strict reviewer who wants the best for the student.`
 
-// Check rate limits
-async function checkRateLimits(userId) {
-  const usage = await getAIUsageToday(userId)
-  
-  if (usage.requests_count >= DAILY_REQUEST_LIMIT) {
-    return { allowed: false, reason: 'Daily request limit reached. Try again tomorrow.' }
-  }
-  
-  if (usage.tokens_used >= DAILY_TOKEN_LIMIT) {
-    return { allowed: false, reason: 'Daily token limit reached. Try again tomorrow.' }
-  }
-  
-  return { allowed: true, remaining: DAILY_REQUEST_LIMIT - usage.requests_count }
-}
-
 // Get curriculum context for the AI
 function getCurriculumContext(subtopicData, phase) {
-  const { title, concepts, prerequisites, teachingGoal, tasks } = subtopicData
+  const { title, concepts, prerequisites, teachingGoal, tasks } = subtopicData || {}
   
   if (phase === 'learning') {
     return `
-CURRENT LESSON: ${title}
+CURRENT LESSON: ${title || 'JavaScript Basics'}
 
 CONCEPTS TO COVER:
-${concepts ? concepts.join('\n- ') : 'General introduction'}
+${concepts ? concepts.map(c => `- ${c}`).join('\n') : '- General introduction'}
 
 PREREQUISITES (what they should already know):
-${prerequisites ? prerequisites.join('\n- ') : 'None'}
+${prerequisites ? prerequisites.map(p => `- ${p}`).join('\n') : '- None'}
 
 TEACHING GOAL:
 ${teachingGoal || 'User should understand the concept and be ready for practice'}
@@ -123,7 +106,7 @@ ${teachingGoal || 'User should understand the concept and be ready for practice'
 Remember: Guide through discovery, don't lecture. Adapt to their responses.`
   } else {
     return `
-CURRENT LESSON: ${title}
+CURRENT LESSON: ${title || 'JavaScript Basics'}
 
 ASSIGNMENTS:
 ${tasks ? tasks.map((t, i) => `${i + 1}. ${t}`).join('\n') : 'Complete the exercises'}
@@ -140,18 +123,26 @@ router.post('/', authenticateToken, requireSubscription, async (req, res) => {
     const userId = req.user.userId
     const { topicId, subtopicId, message, action, subtopicData } = req.body
 
-    // Check rate limits
-    const rateLimitCheck = await checkRateLimits(userId)
-    if (!rateLimitCheck.allowed) {
+    // Check user's current rate limit status
+    const userUsage = rateLimiter.getUserUsage(userId)
+    if (!userUsage.canRequest) {
       return res.status(429).json({
         success: false,
-        message: rateLimitCheck.reason,
-        code: 'RATE_LIMITED'
+        message: 'You\'re sending messages too fast. Please wait a moment.',
+        code: 'USER_RATE_LIMITED',
+        retryAfter: 60
       })
     }
 
-    // Get current progress
-    let progress = await getProgress(userId, topicId, subtopicId)
+    // Get current progress (with caching)
+    let progress = progressCache.getProgress(userId, topicId, subtopicId)
+    if (!progress) {
+      progress = await getProgress(userId, topicId, subtopicId)
+      if (progress) {
+        progressCache.setProgress(userId, topicId, subtopicId, progress)
+      }
+    }
+    
     if (!progress) {
       progress = {
         status: 'not_started',
@@ -172,8 +163,12 @@ router.post('/', authenticateToken, requireSubscription, async (req, res) => {
         assignments_completed: 0,
         started_at: new Date().toISOString()
       })
+      
+      // Invalidate cache
+      progressCache.invalidateProgress(userId)
 
-      const welcomeMessage = await generateAIResponse(
+      // Generate welcome message with rate limiting
+      const welcomeMessage = await generateAIResponseWithQueue(
         userId,
         [],
         'START_LESSON',
@@ -206,8 +201,8 @@ router.post('/', authenticateToken, requireSubscription, async (req, res) => {
     // Save user message
     await addChatMessage(userId, topicId, subtopicId, 'user', message, progress.phase)
 
-    // Generate AI response
-    const aiResponse = await generateAIResponse(
+    // Generate AI response with rate limiting queue
+    const aiResponse = await generateAIResponseWithQueue(
       userId,
       history,
       message,
@@ -227,6 +222,7 @@ router.post('/', authenticateToken, requireSubscription, async (req, res) => {
       responseMessage = responseMessage.replace(/LEARNING_PHASE_COMPLETE/gi, '').trim()
       
       await upsertProgress(userId, topicId, subtopicId, { phase: 'assignment' })
+      progressCache.invalidateProgress(userId)
     }
 
     // Check for assignment completion
@@ -237,6 +233,7 @@ router.post('/', authenticateToken, requireSubscription, async (req, res) => {
       await upsertProgress(userId, topicId, subtopicId, { 
         assignments_completed: assignmentsCompleted 
       })
+      progressCache.invalidateProgress(userId)
     }
 
     // Check for subtopic completion
@@ -248,10 +245,14 @@ router.post('/', authenticateToken, requireSubscription, async (req, res) => {
         status: 'completed',
         completed_at: new Date().toISOString()
       })
+      progressCache.invalidateProgress(userId)
     }
 
     // Save AI response
     await addChatMessage(userId, topicId, subtopicId, 'assistant', responseMessage, newPhase)
+
+    // Get rate limit info for response
+    const rateLimitInfo = rateLimiter.getMetrics()
 
     res.json({
       success: true,
@@ -259,11 +260,32 @@ router.post('/', authenticateToken, requireSubscription, async (req, res) => {
       phase: newPhase,
       assignmentsCompleted,
       subtopicComplete,
-      rateLimitRemaining: rateLimitCheck.remaining - 1
+      rateLimit: {
+        remaining: rateLimitInfo.globalRPMLimit - rateLimitInfo.globalRPMUsed,
+        queueSize: rateLimitInfo.currentQueueSize
+      }
     })
 
   } catch (error) {
     console.error('Chat error:', error)
+    
+    // Handle specific errors
+    if (error.message.includes('Queue is full')) {
+      return res.status(503).json({
+        success: false,
+        message: 'Server is very busy. Please try again in a moment.',
+        code: 'QUEUE_FULL'
+      })
+    }
+    
+    if (error.message.includes('timed out')) {
+      return res.status(504).json({
+        success: false,
+        message: 'Request took too long. Please try again.',
+        code: 'TIMEOUT'
+      })
+    }
+    
     res.status(500).json({
       success: false,
       message: 'Failed to process chat message'
@@ -315,6 +337,8 @@ router.delete('/history/:topicId/:subtopicId', authenticateToken, async (req, re
       started_at: null,
       completed_at: null
     })
+    
+    progressCache.invalidateProgress(userId)
 
     res.json({
       success: true,
@@ -330,7 +354,37 @@ router.delete('/history/:topicId/:subtopicId', authenticateToken, async (req, re
   }
 })
 
-// Generate AI response using Groq
+// GET /api/chat/rate-limit - Get current rate limit status
+router.get('/rate-limit', authenticateToken, (req, res) => {
+  const userId = req.user.userId
+  const userUsage = rateLimiter.getUserUsage(userId)
+  const globalMetrics = rateLimiter.getMetrics()
+  
+  res.json({
+    success: true,
+    user: userUsage,
+    global: {
+      currentRPM: globalMetrics.globalRPMUsed,
+      maxRPM: globalMetrics.globalRPMLimit,
+      queueSize: globalMetrics.currentQueueSize,
+      dailyUsed: globalMetrics.dailyUsed,
+      dailyLimit: globalMetrics.dailyLimit
+    }
+  })
+})
+
+/**
+ * Generate AI response with rate limiting queue
+ */
+async function generateAIResponseWithQueue(userId, history, userMessage, phase, subtopicData) {
+  return rateLimiter.enqueue(userId, async () => {
+    return generateAIResponse(userId, history, userMessage, phase, subtopicData)
+  }, userMessage === 'START_LESSON' ? 1 : 5) // Higher priority for lesson starts
+}
+
+/**
+ * Generate AI response using Groq
+ */
 async function generateAIResponse(userId, history, userMessage, phase, subtopicData) {
   const GROQ_API_KEY = process.env.GROQ_API_KEY
 
@@ -369,7 +423,7 @@ async function generateAIResponse(userId, history, userMessage, phase, subtopicD
     const response = await axios.post(
       'https://api.groq.com/openai/v1/chat/completions',
       {
-        model: 'llama-3.3-70b-versatile',
+        model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
         messages,
         temperature: 0.7,
         max_tokens: 1024
@@ -391,6 +445,12 @@ async function generateAIResponse(userId, history, userMessage, phase, subtopicD
 
   } catch (error) {
     console.error('Groq API error:', error.response?.data || error.message)
+    
+    // Handle rate limit error from Groq
+    if (error.response?.status === 429) {
+      throw new Error('AI service is busy. Please wait a moment and try again.')
+    }
+    
     return getApiErrorMessage(phase)
   }
 }
