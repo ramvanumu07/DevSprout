@@ -1,5 +1,5 @@
 import express from 'express'
-import { authenticateToken, requireSubscription } from './auth.js'
+import { authenticateToken, requireAccess } from './auth.js'
 import {
   getProgress,
   upsertProgress,
@@ -70,7 +70,7 @@ router.get('/:topicId/:subtopicId', authenticateToken, async (req, res) => {
  * POST /api/progress/:topicId/:subtopicId/start
  * Mark subtopic as started
  */
-router.post('/:topicId/:subtopicId/start', authenticateToken, requireSubscription, async (req, res) => {
+router.post('/:topicId/:subtopicId/start', authenticateToken, requireAccess, async (req, res) => {
   try {
     const { topicId, subtopicId } = req.params
     
@@ -98,7 +98,7 @@ router.post('/:topicId/:subtopicId/start', authenticateToken, requireSubscriptio
  * POST /api/progress/:topicId/:subtopicId/phase
  * Update learning phase
  */
-router.post('/:topicId/:subtopicId/phase', authenticateToken, requireSubscription, async (req, res) => {
+router.post('/:topicId/:subtopicId/phase', authenticateToken, requireAccess, async (req, res) => {
   try {
     const { topicId, subtopicId } = req.params
     const { phase } = req.body
@@ -129,7 +129,7 @@ router.post('/:topicId/:subtopicId/phase', authenticateToken, requireSubscriptio
  * POST /api/progress/:topicId/:subtopicId/assignment
  * Increment completed assignments count
  */
-router.post('/:topicId/:subtopicId/assignment', authenticateToken, requireSubscription, async (req, res) => {
+router.post('/:topicId/:subtopicId/assignment', authenticateToken, requireAccess, async (req, res) => {
   try {
     const { topicId, subtopicId } = req.params
     
@@ -158,7 +158,7 @@ router.post('/:topicId/:subtopicId/assignment', authenticateToken, requireSubscr
  * POST /api/progress/:topicId/:subtopicId/complete
  * Mark subtopic as completed
  */
-router.post('/:topicId/:subtopicId/complete', authenticateToken, requireSubscription, async (req, res) => {
+router.post('/:topicId/:subtopicId/complete', authenticateToken, requireAccess, async (req, res) => {
   try {
     const { topicId, subtopicId } = req.params
     

@@ -3,7 +3,6 @@ import api from '../config/api'
 
 const AuthContext = createContext(null)
 
-// Token management
 const TOKEN_KEY = 'devsprout_token'
 const USER_KEY = 'devsprout_user'
 
@@ -32,17 +31,14 @@ export function AuthProvider({ children }) {
       api.defaults.headers.common['Authorization'] = `Bearer ${token}`
     }
 
-    // Response interceptor for handling 401/403 errors
     const interceptor = api.interceptors.response.use(
       response => response,
       error => {
-        if (error.response?.status === 401 || error.response?.status === 403) {
-          // Token expired or invalid
-          if (error.response?.data?.code !== 'SUBSCRIPTION_REQUIRED') {
-            clearStoredAuth()
-            setUser(null)
-            delete api.defaults.headers.common['Authorization']
-          }
+        if (error.response?.status === 401 || 
+            (error.response?.status === 403 && error.response?.data?.code !== 'ACCESS_REQUIRED' && error.response?.data?.code !== 'ACCESS_EXPIRED')) {
+          clearStoredAuth()
+          setUser(null)
+          delete api.defaults.headers.common['Authorization']
         }
         return Promise.reject(error)
       }
@@ -60,8 +56,6 @@ export function AuthProvider({ children }) {
       if (token && savedUser) {
         try {
           api.defaults.headers.common['Authorization'] = `Bearer ${token}`
-          
-          // Verify token is still valid and get fresh user data
           const response = await api.get('/api/auth/me')
           
           if (response.data.success) {
@@ -83,10 +77,15 @@ export function AuthProvider({ children }) {
   }, [])
 
   // Register new user
-  const register = async (email, name) => {
+  const register = async (studentId, password, name, email) => {
     try {
       setError(null)
-      const response = await api.post('/api/auth/register', { email, name })
+      const response = await api.post('/api/auth/register', { 
+        studentId, 
+        password, 
+        name,
+        email 
+      })
       
       if (response.data.success) {
         const { user: userData, token } = response.data
@@ -97,22 +96,22 @@ export function AuthProvider({ children }) {
         setUser(userData)
         localStorage.setItem(USER_KEY, JSON.stringify(userData))
         
-        return { success: true }
+        return { success: true, message: response.data.message }
       } else {
         return { success: false, error: response.data.message }
       }
     } catch (error) {
-      const message = error.response?.data?.message || 'Registration failed. Please try again.'
+      const message = error.response?.data?.message || 'Registration failed'
       setError(message)
       return { success: false, error: message }
     }
   }
 
-  // Login with email
-  const login = async (email) => {
+  // Login with studentId and password
+  const login = async (studentId, password) => {
     try {
       setError(null)
-      const response = await api.post('/api/auth/login', { email })
+      const response = await api.post('/api/auth/login', { studentId, password })
       
       if (response.data.success) {
         const { user: userData, token } = response.data
@@ -128,7 +127,7 @@ export function AuthProvider({ children }) {
         return { success: false, error: response.data.message }
       }
     } catch (error) {
-      const message = error.response?.data?.message || 'Login failed. Please try again.'
+      const message = error.response?.data?.message || 'Login failed'
       setError(message)
       return { success: false, error: message }
     }
@@ -158,28 +157,9 @@ export function AuthProvider({ children }) {
     return null
   }, [])
 
-  // Update user subscription status (called after payment)
-  const updateSubscription = useCallback((subscriptionData) => {
-    setUser(prev => {
-      if (!prev) return prev
-      const updated = {
-        ...prev,
-        hasSubscription: true,
-        subscription: subscriptionData
-      }
-      localStorage.setItem(USER_KEY, JSON.stringify(updated))
-      return updated
-    })
-  }, [])
-
-  // Check if user has active subscription
-  const hasActiveSubscription = useCallback(() => {
-    if (!user) return false
-    if (!user.hasSubscription) return false
-    if (!user.subscription) return false
-    
-    const expiresAt = new Date(user.subscription.expiresAt)
-    return expiresAt > new Date()
+  // Check if user has access (paid)
+  const hasAccess = useCallback(() => {
+    return user?.hasAccess === true
   }, [user])
 
   return (
@@ -191,8 +171,7 @@ export function AuthProvider({ children }) {
       login, 
       logout,
       refreshUser,
-      updateSubscription,
-      hasActiveSubscription,
+      hasAccess,
       isAuthenticated: !!user,
       isAdmin: user?.isAdmin || false
     }}>

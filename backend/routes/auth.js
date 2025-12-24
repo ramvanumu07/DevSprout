@@ -1,18 +1,19 @@
 import express from 'express'
 import jwt from 'jsonwebtoken'
-import { 
-  getUserByEmail, 
-  createUser, 
-  getUserById,
-  checkSubscriptionActive,
-  getSubscription,
-  isAdmin
-} from '../services/supabase.js'
+import crypto from 'crypto'
+import { supabaseAdmin } from '../services/supabase.js'
 
 const router = express.Router()
 
 const JWT_SECRET = process.env.JWT_SECRET || 'devsprout-secret-key-change-in-production'
 const JWT_EXPIRES_IN = '7d'
+
+/**
+ * Hash password using SHA256 (simple, no bcrypt dependency)
+ */
+function hashPassword(password) {
+  return crypto.createHash('sha256').update(password).digest('hex')
+}
 
 /**
  * Generate JWT token for user
@@ -21,7 +22,7 @@ function generateToken(user) {
   return jwt.sign(
     { 
       userId: user.id, 
-      email: user.email,
+      studentId: user.student_id,
       name: user.name
     },
     JWT_SECRET,
@@ -34,7 +35,7 @@ function generateToken(user) {
  */
 export function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization']
-  const token = authHeader && authHeader.split(' ')[1] // Bearer TOKEN
+  const token = authHeader && authHeader.split(' ')[1]
 
   if (!token) {
     return res.status(401).json({ success: false, message: 'Access token required' })
@@ -50,22 +51,42 @@ export function authenticateToken(req, res, next) {
 }
 
 /**
- * Check if user has active subscription
+ * Check if user has active access (paid manually)
  */
-export async function requireSubscription(req, res, next) {
+export async function requireAccess(req, res, next) {
   try {
-    const hasSubscription = await checkSubscriptionActive(req.user.userId)
-    if (!hasSubscription) {
+    const { data: user, error } = await supabaseAdmin
+      .from('users')
+      .select('has_access, access_expires_at')
+      .eq('id', req.user.userId)
+      .single()
+    
+    if (error || !user) {
+      return res.status(404).json({ success: false, message: 'User not found' })
+    }
+    
+    // Check has_access
+    if (!user.has_access) {
       return res.status(403).json({ 
         success: false, 
-        message: 'Active subscription required',
-        code: 'SUBSCRIPTION_REQUIRED'
+        message: 'Access required. Please contact admin after payment.',
+        code: 'ACCESS_REQUIRED'
       })
     }
+    
+    // Check expiry if set
+    if (user.access_expires_at && new Date(user.access_expires_at) < new Date()) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Your access has expired. Please renew.',
+        code: 'ACCESS_EXPIRED'
+      })
+    }
+    
     next()
   } catch (error) {
-    console.error('Subscription check error:', error)
-    res.status(500).json({ success: false, message: 'Failed to verify subscription' })
+    console.error('Access check error:', error)
+    res.status(500).json({ success: false, message: 'Failed to verify access' })
   }
 }
 
@@ -74,10 +95,16 @@ export async function requireSubscription(req, res, next) {
  */
 export async function requireAdmin(req, res, next) {
   try {
-    const adminStatus = await isAdmin(req.user.userId)
-    if (!adminStatus) {
+    const { data, error } = await supabaseAdmin
+      .from('admins')
+      .select()
+      .eq('user_id', req.user.userId)
+      .single()
+    
+    if (error || !data) {
       return res.status(403).json({ success: false, message: 'Admin access required' })
     }
+    
     next()
   } catch (error) {
     console.error('Admin check error:', error)
@@ -87,40 +114,65 @@ export async function requireAdmin(req, res, next) {
 
 /**
  * POST /api/auth/register
- * Register a new user
+ * Register a new user (they won't have access until admin activates)
  */
 router.post('/register', async (req, res) => {
   try {
-    const { email, name } = req.body
+    const { studentId, password, name, email } = req.body
 
-    if (!email || !name) {
+    if (!studentId || !password || !name) {
       return res.status(400).json({ 
         success: false, 
-        message: 'Email and name are required' 
+        message: 'Student ID, password, and name are required' 
       })
     }
 
-    // Check if user already exists
-    const existingUser = await getUserByEmail(email)
-    if (existingUser) {
+    if (password.length < 4) {
       return res.status(400).json({ 
         success: false, 
-        message: 'User with this email already exists' 
+        message: 'Password must be at least 4 characters' 
       })
     }
 
-    // Create new user
-    const user = await createUser(email.toLowerCase(), name)
+    // Check if student ID already exists
+    const { data: existing } = await supabaseAdmin
+      .from('users')
+      .select('id')
+      .eq('student_id', studentId.toLowerCase())
+      .single()
+    
+    if (existing) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'This Student ID is already taken' 
+      })
+    }
+
+    // Create new user (has_access = false by default)
+    const { data: user, error } = await supabaseAdmin
+      .from('users')
+      .insert({
+        student_id: studentId.toLowerCase(),
+        password: hashPassword(password),
+        name,
+        email: email || null,
+        has_access: false // Will be activated after manual payment
+      })
+      .select()
+      .single()
+    
+    if (error) throw error
+
     const token = generateToken(user)
 
     res.status(201).json({
       success: true,
-      message: 'Registration successful',
+      message: 'Registration successful! Please complete payment and contact admin for access.',
       user: {
         id: user.id,
-        email: user.email,
+        studentId: user.student_id,
         name: user.name,
-        hasSubscription: false
+        hasAccess: user.has_access
       },
       token
     })
@@ -132,32 +184,55 @@ router.post('/register', async (req, res) => {
 
 /**
  * POST /api/auth/login
- * Login with email (passwordless - for MVP)
+ * Login with Student ID and Password
  */
 router.post('/login', async (req, res) => {
   try {
-    const { email } = req.body
+    const { studentId, password } = req.body
 
-    if (!email) {
+    if (!studentId || !password) {
       return res.status(400).json({ 
         success: false, 
-        message: 'Email is required' 
+        message: 'Student ID and password are required' 
       })
     }
 
     // Find user
-    const user = await getUserByEmail(email.toLowerCase())
-    if (!user) {
-      return res.status(404).json({ 
+    const { data: user, error } = await supabaseAdmin
+      .from('users')
+      .select('*')
+      .eq('student_id', studentId.toLowerCase())
+      .single()
+    
+    if (error || !user) {
+      return res.status(401).json({ 
         success: false, 
-        message: 'User not found. Please register first.' 
+        message: 'Invalid Student ID or password' 
       })
     }
 
-    // Check subscription status
-    const hasSubscription = await checkSubscriptionActive(user.id)
-    const subscription = await getSubscription(user.id)
-    const adminStatus = await isAdmin(user.id)
+    // Verify password
+    if (user.password !== hashPassword(password)) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid Student ID or password' 
+      })
+    }
+
+    // Check if admin
+    const { data: adminData } = await supabaseAdmin
+      .from('admins')
+      .select()
+      .eq('user_id', user.id)
+      .single()
+    
+    const isAdmin = !!adminData
+
+    // Check access expiry
+    let accessExpired = false
+    if (user.has_access && user.access_expires_at) {
+      accessExpired = new Date(user.access_expires_at) < new Date()
+    }
 
     const token = generateToken(user)
 
@@ -166,15 +241,11 @@ router.post('/login', async (req, res) => {
       message: 'Login successful',
       user: {
         id: user.id,
-        email: user.email,
+        studentId: user.student_id,
         name: user.name,
-        hasSubscription,
-        subscription: subscription ? {
-          plan: subscription.plan,
-          status: subscription.status,
-          expiresAt: subscription.expires_at
-        } : null,
-        isAdmin: adminStatus
+        hasAccess: user.has_access && !accessExpired,
+        accessExpiresAt: user.access_expires_at,
+        isAdmin
       },
       token
     })
@@ -190,28 +261,39 @@ router.post('/login', async (req, res) => {
  */
 router.get('/me', authenticateToken, async (req, res) => {
   try {
-    const user = await getUserById(req.user.userId)
-    if (!user) {
+    const { data: user, error } = await supabaseAdmin
+      .from('users')
+      .select('*')
+      .eq('id', req.user.userId)
+      .single()
+    
+    if (error || !user) {
       return res.status(404).json({ success: false, message: 'User not found' })
     }
 
-    const hasSubscription = await checkSubscriptionActive(user.id)
-    const subscription = await getSubscription(user.id)
-    const adminStatus = await isAdmin(user.id)
+    // Check if admin
+    const { data: adminData } = await supabaseAdmin
+      .from('admins')
+      .select()
+      .eq('user_id', user.id)
+      .single()
+
+    // Check access expiry
+    let accessExpired = false
+    if (user.has_access && user.access_expires_at) {
+      accessExpired = new Date(user.access_expires_at) < new Date()
+    }
 
     res.json({
       success: true,
       user: {
         id: user.id,
-        email: user.email,
+        studentId: user.student_id,
         name: user.name,
-        hasSubscription,
-        subscription: subscription ? {
-          plan: subscription.plan,
-          status: subscription.status,
-          expiresAt: subscription.expires_at
-        } : null,
-        isAdmin: adminStatus
+        email: user.email,
+        hasAccess: user.has_access && !accessExpired,
+        accessExpiresAt: user.access_expires_at,
+        isAdmin: !!adminData
       }
     })
   } catch (error) {
@@ -220,16 +302,194 @@ router.get('/me', authenticateToken, async (req, res) => {
   }
 })
 
+// =====================
+// ADMIN ROUTES - For managing user access
+// =====================
+
 /**
- * POST /api/auth/verify-token
- * Verify if token is still valid
+ * GET /api/auth/admin/users
+ * Get all users (admin only)
  */
-router.post('/verify-token', authenticateToken, (req, res) => {
-  res.json({ 
-    success: true, 
-    valid: true,
-    user: req.user
-  })
+router.get('/admin/users', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { data: users, error } = await supabaseAdmin
+      .from('users')
+      .select('id, student_id, name, email, has_access, access_expires_at, created_at')
+      .order('created_at', { ascending: false })
+    
+    if (error) throw error
+
+    res.json({
+      success: true,
+      users: users.map(u => ({
+        id: u.id,
+        studentId: u.student_id,
+        name: u.name,
+        email: u.email,
+        hasAccess: u.has_access,
+        accessExpiresAt: u.access_expires_at,
+        createdAt: u.created_at
+      }))
+    })
+  } catch (error) {
+    console.error('Get users error:', error)
+    res.status(500).json({ success: false, message: 'Failed to get users' })
+  }
+})
+
+/**
+ * POST /api/auth/admin/grant-access
+ * Grant access to a user after manual payment (admin only)
+ */
+router.post('/admin/grant-access', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { studentId, durationDays } = req.body
+
+    if (!studentId) {
+      return res.status(400).json({ success: false, message: 'Student ID required' })
+    }
+
+    // Calculate expiry date if duration provided
+    let accessExpiresAt = null
+    if (durationDays) {
+      accessExpiresAt = new Date()
+      accessExpiresAt.setDate(accessExpiresAt.getDate() + parseInt(durationDays))
+    }
+
+    const { data: user, error } = await supabaseAdmin
+      .from('users')
+      .update({ 
+        has_access: true,
+        access_expires_at: accessExpiresAt
+      })
+      .eq('student_id', studentId.toLowerCase())
+      .select()
+      .single()
+    
+    if (error || !user) {
+      return res.status(404).json({ success: false, message: 'User not found' })
+    }
+
+    res.json({
+      success: true,
+      message: `Access granted to ${user.name}`,
+      user: {
+        studentId: user.student_id,
+        name: user.name,
+        hasAccess: user.has_access,
+        accessExpiresAt: user.access_expires_at
+      }
+    })
+  } catch (error) {
+    console.error('Grant access error:', error)
+    res.status(500).json({ success: false, message: 'Failed to grant access' })
+  }
+})
+
+/**
+ * POST /api/auth/admin/revoke-access
+ * Revoke access from a user (admin only)
+ */
+router.post('/admin/revoke-access', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { studentId } = req.body
+
+    if (!studentId) {
+      return res.status(400).json({ success: false, message: 'Student ID required' })
+    }
+
+    const { data: user, error } = await supabaseAdmin
+      .from('users')
+      .update({ has_access: false })
+      .eq('student_id', studentId.toLowerCase())
+      .select()
+      .single()
+    
+    if (error || !user) {
+      return res.status(404).json({ success: false, message: 'User not found' })
+    }
+
+    res.json({
+      success: true,
+      message: `Access revoked from ${user.name}`,
+      user: {
+        studentId: user.student_id,
+        name: user.name,
+        hasAccess: user.has_access
+      }
+    })
+  } catch (error) {
+    console.error('Revoke access error:', error)
+    res.status(500).json({ success: false, message: 'Failed to revoke access' })
+  }
+})
+
+/**
+ * POST /api/auth/admin/create-user
+ * Create a user with access already granted (for paid users)
+ */
+router.post('/admin/create-user', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { studentId, password, name, email, durationDays } = req.body
+
+    if (!studentId || !password || !name) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Student ID, password, and name are required' 
+      })
+    }
+
+    // Check if exists
+    const { data: existing } = await supabaseAdmin
+      .from('users')
+      .select('id')
+      .eq('student_id', studentId.toLowerCase())
+      .single()
+    
+    if (existing) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Student ID already exists' 
+      })
+    }
+
+    // Calculate expiry
+    let accessExpiresAt = null
+    if (durationDays) {
+      accessExpiresAt = new Date()
+      accessExpiresAt.setDate(accessExpiresAt.getDate() + parseInt(durationDays))
+    }
+
+    // Create user with access
+    const { data: user, error } = await supabaseAdmin
+      .from('users')
+      .insert({
+        student_id: studentId.toLowerCase(),
+        password: hashPassword(password),
+        name,
+        email: email || null,
+        has_access: true,
+        access_expires_at: accessExpiresAt
+      })
+      .select()
+      .single()
+    
+    if (error) throw error
+
+    res.status(201).json({
+      success: true,
+      message: 'User created with access',
+      user: {
+        studentId: user.student_id,
+        name: user.name,
+        hasAccess: user.has_access,
+        accessExpiresAt: user.access_expires_at
+      }
+    })
+  } catch (error) {
+    console.error('Create user error:', error)
+    res.status(500).json({ success: false, message: 'Failed to create user' })
+  }
 })
 
 export default router

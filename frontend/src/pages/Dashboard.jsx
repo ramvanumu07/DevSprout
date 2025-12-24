@@ -13,18 +13,19 @@ import {
   BookOpen,
   Sprout,
   Lock,
-  Crown
+  Crown,
+  AlertCircle
 } from 'lucide-react'
 
 export default function Dashboard() {
-  const { user, logout, hasActiveSubscription } = useAuth()
+  const { user, logout, hasAccess } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
   const [expandedTopics, setExpandedTopics] = useState([])
   const [progressData, setProgressData] = useState({})
   const [successMessage, setSuccessMessage] = useState(location.state?.message || null)
   
-  const isSubscribed = hasActiveSubscription()
+  const userHasAccess = hasAccess()
 
   // Load progress from server
   useEffect(() => {
@@ -39,10 +40,10 @@ export default function Dashboard() {
       }
     }
 
-    if (isSubscribed) {
+    if (userHasAccess) {
       loadProgress()
     }
-  }, [isSubscribed])
+  }, [userHasAccess])
 
   // Clear success message after 5 seconds
   useEffect(() => {
@@ -74,9 +75,8 @@ export default function Dashboard() {
   }
 
   const handleStartSubtopic = (topicId, subtopicId) => {
-    if (!isSubscribed) {
-      navigate('/subscribe')
-      return
+    if (!userHasAccess) {
+      return // Will show no access banner
     }
     navigate(`/learn/${topicId}/${subtopicId}`)
   }
@@ -93,27 +93,24 @@ export default function Dashboard() {
         </div>
           
         <div className="flex items-center gap-3">
-          {/* Subscription Badge */}
-          {isSubscribed ? (
+          {/* Access Badge */}
+          {userHasAccess ? (
             <div className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 bg-emerald-500/20 text-emerald-400 rounded-full text-sm">
               <Crown className="w-4 h-4" />
-              <span>Pro</span>
+              <span>Active</span>
             </div>
           ) : (
-            <button
-              onClick={() => navigate('/subscribe')}
-              className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 rounded-full text-sm transition-colors"
-            >
+            <div className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 bg-amber-500/20 text-amber-400 rounded-full text-sm">
               <Lock className="w-4 h-4" />
-              <span>Subscribe</span>
-            </button>
+              <span>Pending</span>
+            </div>
           )}
           
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center">
               <User className="w-4 h-4 text-slate-300" />
             </div>
-            <span className="text-sm text-slate-300 hidden sm:block">{user?.name || user?.email}</span>
+            <span className="text-sm text-slate-300 hidden sm:block">{user?.name || user?.studentId}</span>
           </div>
           <button
             onClick={() => {
@@ -142,8 +139,8 @@ export default function Dashboard() {
           </motion.div>
         )}
 
-        {/* Subscription Banner (if not subscribed) */}
-        {!isSubscribed && (
+        {/* No Access Banner */}
+        {!userHasAccess && (
           <motion.div
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
@@ -151,26 +148,28 @@ export default function Dashboard() {
           >
             <div className="flex items-start gap-4">
               <div className="w-12 h-12 rounded-xl bg-amber-500/20 flex items-center justify-center flex-shrink-0">
-                <Crown className="w-6 h-6 text-amber-400" />
+                <AlertCircle className="w-6 h-6 text-amber-400" />
               </div>
               <div className="flex-1">
-                <h3 className="text-lg font-semibold text-white mb-1">Unlock Full Access</h3>
-                <p className="text-slate-400 text-sm mb-4">
-                  Subscribe to get AI-powered personalized learning, unlimited lessons, and track your progress.
+                <h3 className="text-lg font-semibold text-white mb-1">Access Pending</h3>
+                <p className="text-slate-400 text-sm mb-3">
+                  Your account is registered! To start learning:
                 </p>
-                <button
-                  onClick={() => navigate('/subscribe')}
-                  className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-black font-medium rounded-lg transition-colors"
-                >
-                  Subscribe for ₹200/month
-                </button>
+                <ol className="text-slate-400 text-sm space-y-1 mb-3">
+                  <li>1. Pay ₹200 (UPI/Bank Transfer)</li>
+                  <li>2. Send screenshot to admin with your ID: <span className="text-emerald-400 font-mono">{user?.studentId}</span></li>
+                  <li>3. Admin will activate your access</li>
+                </ol>
+                <p className="text-slate-500 text-xs">
+                  Contact: [Your contact info here]
+                </p>
               </div>
             </div>
           </motion.div>
         )}
 
-        {/* Progress Bar (if subscribed) */}
-        {isSubscribed && (
+        {/* Progress Bar (if has access) */}
+        {userHasAccess && (
           <div className="mb-8">
             <div className="flex justify-between text-sm text-slate-400 mb-2">
               <span>Course Progress</span>
@@ -214,7 +213,7 @@ export default function Dashboard() {
                     <p className="font-medium text-white">{topic.title}</p>
                   </div>
                   <div className="flex items-center gap-3">
-                    {isSubscribed && (
+                    {userHasAccess && (
                       <span className="text-sm text-slate-400">
                         {topicProgress.completed}/{topicProgress.total}
                       </span>
@@ -244,11 +243,12 @@ export default function Dashboard() {
                             <button
                               key={subtopic.id}
                               onClick={() => handleStartSubtopic(topic.id, subtopic.id)}
-                              className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-slate-700/30 transition-colors border-b border-slate-700/30 last:border-b-0"
+                              disabled={!userHasAccess}
+                              className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-slate-700/30 transition-colors border-b border-slate-700/30 last:border-b-0 disabled:opacity-50 disabled:cursor-not-allowed"
                             >
                               {completed ? (
                                 <CheckCircle2 className="w-5 h-5 text-emerald-500 flex-shrink-0" />
-                              ) : isSubscribed ? (
+                              ) : userHasAccess ? (
                                 <Circle className="w-5 h-5 text-slate-600 flex-shrink-0" />
                               ) : (
                                 <Lock className="w-5 h-5 text-slate-600 flex-shrink-0" />

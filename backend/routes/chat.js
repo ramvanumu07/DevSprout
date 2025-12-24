@@ -1,6 +1,6 @@
 import express from 'express'
 import axios from 'axios'
-import { authenticateToken, requireSubscription } from './auth.js'
+import { authenticateToken, requireAccess } from './auth.js'
 import {
   getChatHistory,
   addChatMessage,
@@ -118,7 +118,7 @@ Verify they understand, not just that code works.`
 }
 
 // POST /api/chat - Main chat endpoint
-router.post('/', authenticateToken, requireSubscription, async (req, res) => {
+router.post('/', authenticateToken, requireAccess, async (req, res) => {
   try {
     const userId = req.user.userId
     const { topicId, subtopicId, message, action, subtopicData } = req.body

@@ -1,19 +1,23 @@
 import { useState } from 'react'
 import { motion } from 'framer-motion'
 import { useAuth } from '../contexts/AuthContext'
-import { Sprout, ArrowRight, AlertCircle, Mail, User } from 'lucide-react'
+import { Sprout, ArrowRight, AlertCircle, User, Lock, Mail, UserPlus } from 'lucide-react'
 
 export default function Login() {
   const [isRegister, setIsRegister] = useState(false)
-  const [email, setEmail] = useState('')
+  const [studentId, setStudentId] = useState('')
+  const [password, setPassword] = useState('')
   const [name, setName] = useState('')
+  const [email, setEmail] = useState('')
   const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const { login, register } = useAuth()
 
   const handleSubmit = async (e) => {
     e.preventDefault()
     setError('')
+    setSuccess('')
     setIsLoading(true)
 
     let result
@@ -23,9 +27,12 @@ export default function Login() {
         setIsLoading(false)
         return
       }
-      result = await register(email.trim(), name.trim())
+      result = await register(studentId.trim(), password, name.trim(), email.trim())
+      if (result.success) {
+        setSuccess(result.message || 'Registration successful! Contact admin for access after payment.')
+      }
     } else {
-      result = await login(email.trim())
+      result = await login(studentId.trim(), password)
     }
     
     if (!result.success) {
@@ -66,37 +73,84 @@ export default function Login() {
               <motion.div
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: 'auto' }}
-                exit={{ opacity: 0, height: 0 }}
               >
-                <label className="block text-sm text-slate-400 mb-1.5">Name</label>
+                <label className="block text-sm text-slate-400 mb-1.5">Full Name</label>
                 <div className="relative">
-                  <User className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
+                  <UserPlus className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
                   <input
                     type="text"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    placeholder="Your name"
+                    placeholder="Your full name"
                     className="w-full bg-slate-900/50 border border-slate-600 rounded-xl py-3 pl-10 pr-4 text-white placeholder:text-slate-500 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
                   />
                 </div>
               </motion.div>
             )}
 
-            {/* Email Input */}
+            {/* Student ID Input */}
             <div>
-              <label className="block text-sm text-slate-400 mb-1.5">Email</label>
+              <label className="block text-sm text-slate-400 mb-1.5">Student ID</label>
               <div className="relative">
-                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
+                <User className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
                 <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="you@example.com"
+                  type="text"
+                  value={studentId}
+                  onChange={(e) => setStudentId(e.target.value)}
+                  placeholder="e.g., john123"
                   className="w-full bg-slate-900/50 border border-slate-600 rounded-xl py-3 pl-10 pr-4 text-white placeholder:text-slate-500 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
                   required
                 />
               </div>
             </div>
+
+            {/* Password Input */}
+            <div>
+              <label className="block text-sm text-slate-400 mb-1.5">Password</label>
+              <div className="relative">
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full bg-slate-900/50 border border-slate-600 rounded-xl py-3 pl-10 pr-4 text-white placeholder:text-slate-500 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
+                  required
+                />
+              </div>
+            </div>
+
+            {/* Email Input (Register only, optional) */}
+            {isRegister && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+              >
+                <label className="block text-sm text-slate-400 mb-1.5">Email (optional)</label>
+                <div className="relative">
+                  <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
+                  <input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="you@example.com"
+                    className="w-full bg-slate-900/50 border border-slate-600 rounded-xl py-3 pl-10 pr-4 text-white placeholder:text-slate-500 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
+                  />
+                </div>
+              </motion.div>
+            )}
+
+            {/* Success Message */}
+            {success && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="flex items-start gap-2 text-emerald-400 text-sm py-3 px-3 bg-emerald-500/10 border border-emerald-500/20 rounded-lg"
+              >
+                <Sprout className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                <span>{success}</span>
+              </motion.div>
+            )}
 
             {/* Error Message */}
             {error && (
@@ -120,7 +174,7 @@ export default function Login() {
                 <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
               ) : (
                 <>
-                  <span>{isRegister ? 'Create Account' : 'Continue'}</span>
+                  <span>{isRegister ? 'Create Account' : 'Sign In'}</span>
                   <ArrowRight className="w-4 h-4" />
                 </>
               )}
@@ -134,6 +188,7 @@ export default function Login() {
               onClick={() => {
                 setIsRegister(!isRegister)
                 setError('')
+                setSuccess('')
               }}
               className="text-slate-400 hover:text-white transition-colors text-sm"
             >
@@ -146,10 +201,11 @@ export default function Login() {
           </div>
         </div>
 
-        {/* Footer */}
-        <p className="text-center text-slate-500 text-xs mt-6">
-          By continuing, you agree to our Terms of Service
-        </p>
+        {/* Payment Info */}
+        <div className="mt-6 text-center text-slate-500 text-xs">
+          <p>After registration, complete payment (₹200) and</p>
+          <p>contact admin to activate your access.</p>
+        </div>
       </motion.div>
     </div>
   )
